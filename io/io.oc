@@ -1,0 +1,113 @@
+package io;
+extern i32 puts(buffer<i8>);
+
+type cStr buffer<i8>;
+
+func cStrOf(oceanString string) buffer<i8> {
+	oceanString += "\0";
+	return oceanString.data;
+}
+
+func Print(items ...any) {
+	totalString := Sprint(items...);
+	totalCString := cStrOf(totalString);
+	extern.puts(totalCString);
+}
+
+func Println(items ...any) {
+	newItems := any[len(items) + 1];
+	newItems = items;
+	newItems[len(newItems) - 1] = "\n";
+	Print(items...);
+}
+
+func Sprint(items ...any) string {
+	totalString := "";
+	for (i, item := range items) {
+		if (i > 0 && !isString(items[i - 1]) && !isString(item)) totalString += " ";
+		totalString += sprintItem(item);
+	}
+	return totalString;
+}
+
+// Ccean's Sprintf (and Printf) functions don't use C-style format templates.
+// rather, {} is replaced with a variable
+func Sprintf(format string, items ...any) string {
+	str := "";
+	itemsIndex := 0;
+	for (i := 0; i < len(format); i++) {
+		c := format[i];
+		switch (c) {
+			case '{':
+				// handle formats
+				if (i + 1 < len(format) && format[i + 1] == '}') {
+					i += 2;
+					if (itemsIndex < len(itmes)) {
+						str += sprintItem(items[itemsIndex++]);
+					} else {
+						return panic "Sprintf() called with not enough variables to insert";
+					}
+				}
+			case '\\':
+				if (i + 1 < len(format) && format[i + 1] == '{') {
+					str += '{';
+					i++;
+				} else if (i + 1 < len(format) && format[i + 1] == '\\')) {
+					str += '\\';
+					i++;
+				}
+			default:
+				str += c;
+		}
+	}
+	if (itemsIndex < len(items)) return panic "Sprintf() called with too many variables to insert."
+	reurn str;
+}
+
+func isString(item any) bool {
+	switch (item.(type)) {
+		case string:
+			return true;
+		default:
+			return false;
+	}
+}
+
+func sprintItem(item any) string {
+	switch (item.(type)) {
+		case int, i32, i16, i8:
+			return sprintInt(item);
+		case float, f32:
+			return sprintFloat(item, );
+		case string:
+			return item.(string);
+		case buffer:
+			return "[buffer]";
+		case any[]:
+			str := "[";
+			for (i, value := range item.(any[])) {
+				str += (i > 0 ? " " : "") + sprintItem(value);
+			}
+			return str + "]";
+		default:
+			return "[unknown type]"
+	}
+}
+
+func digitToChar(x int) i8 {
+	if (x < 0 || x > 9) return panic "digitToChar() called with invalid value (<0 or >9)";
+	c := x->i8;
+	return c + 48;
+}
+
+func sprintInt(x int) string {
+	str := "";
+	for (x > 9) {
+		str = digitToChar(x = x % 10) + str;
+	}
+	return digitToChar(x % 10) + str;
+}
+
+func sprintFloat(x float, decimals int) string {
+	
+}
