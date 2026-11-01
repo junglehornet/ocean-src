@@ -33,7 +33,3 @@ root, normally `<install directory>/src/reflect`. A copied source file, a
 project-local package named `reflect`, and symlinks escaping that directory do
 not receive access. Importing the public `reflect` API is supported in ordinary
 Ocean code; calling its compiler primitives directly is rejected.
-
-`OCEAN_SRC` explicitly overrides the trusted standard-library root for compiler
-development. It is compiler configuration, not a permission granted by source
-code. Reflection reads field snapshots; it exposes no raw struct-layout access.
