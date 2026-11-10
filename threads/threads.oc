@@ -1,0 +1,42 @@
+package threads;
+
+extern int ocean_threads_current();
+extern i32 ocean_threads_await(int id);
+extern i32 ocean_threads_is_done(int id);
+extern void ocean_threads_yield();
+extern i32 ocean_threads_wake(int id);
+extern i32 ocean_threads_kill(int id);
+
+// Main is 0. Worker IDs are positive, monotonically allocated, and never reused.
+func CurrentID() int {
+    id := extern.ocean_threads_current();
+    if (id < 0) panic "unregistered native thread";
+    return id;
+}
+func Spawn(job func()) int {
+    id := compilerThreadSpawn(job);
+    if (id < 0) panic "thread creation failed";
+    return id;
+}
+func Await(id int) {
+    status := extern.ocean_threads_await(id);
+    if (status == -1) panic "invalid thread ID";
+    if (status == -2) panic "thread cannot await itself";
+}
+func IsDone(id int) bool {
+    status := extern.ocean_threads_is_done(id);
+    if (status < 0) panic "invalid thread ID";
+    return status != 0;
+}
+// Parks until a Wake arrives while parked. Earlier wakes are discarded.
+func Yield() { extern.ocean_threads_yield(); }
+func Wake(id int) {
+    if (extern.ocean_threads_wake(id) < 0) panic "invalid thread ID";
+}
+// Return unwinds this thread's defers and exits it, from any call depth.
+func Return() { compilerThreadReturn(); }
+// Kill requests cancellation at the target's next compiler/runtime checkpoint.
+// It is safe to Await afterward. Killing a completed thread does nothing.
+func Kill(id int) {
+    if (extern.ocean_threads_kill(id) < 0) panic "invalid thread ID";
+}

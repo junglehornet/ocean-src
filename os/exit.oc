@@ -1,0 +1,7 @@
+package os;
+
+extern void _Exit(i32 status);
+
+// Exit terminates the entire process, including every thread, immediately.
+// Deferred calls and process cleanup do not run. Native status is a C int.
+func Exit(code int) { extern._Exit(code -> i32); }

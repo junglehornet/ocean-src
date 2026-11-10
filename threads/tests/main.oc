@@ -1,0 +1,285 @@
+package main;
+import "threads";
+import "sync";
+import "os";
+import "io";
+
+struct duration { seconds int; nanoseconds int; }
+func pause() {
+    delay := duration{0, 20000000};
+    data: *void = &delay;
+    asm x86_64/linux {
+        mov rdi, ${data}
+        xor esi, esi
+        sub rsp, 16
+        call nanosleep
+        add rsp, 16
+    }
+    asm x86_64/macos {
+        mov rdi, ${data}
+        xor esi, esi
+        sub rsp, 16
+        call _nanosleep
+        add rsp, 16
+    }
+    asm aarch64/linux {
+        ldr x19, ${data}
+        sub sp, sp, #64
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, #0
+        bl nanosleep
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #64
+    }
+    asm aarch64/macos {
+        ldr x19, ${data}
+        sub sp, sp, #64
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, #0
+        bl _nanosleep
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #64
+    }
+    asm riscv64/linux {
+        ld a0, ${data}
+        li a1, 0
+        li a7, 101
+        ecall
+    }
+    asm x86_64/windows {
+        sub rsp, 48
+        mov ecx, 20
+        call Sleep
+        add rsp, 48
+    }
+    asm aarch64/windows {
+        sub sp, sp, #64
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov w0, #20
+        bl Sleep
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #64
+    }
+}
+func require(condition bool) { if (!condition) panic "thread assertion failed"; }
+func returned(done *sync.WaitGroup, depth int) {
+    defer done.Done();
+    if (depth == 0) threads.Return();
+    returned(done, depth - 1);
+    panic "Return resumed";
+}
+unexpected := false;
+func rescue() { recover(); }
+func returnFromDefer(done *sync.WaitGroup) {
+    defer done.Done();
+    defer threads.Return();
+}
+func invalid(operation int) {
+    defer rescue();
+    if (operation == 0) threads.Wake(-1);
+    if (operation == 1) threads.Await(999999);
+    if (operation == 2) threads.IsDone(-1);
+    if (operation == 3) threads.Kill(999999);
+    if (operation == 4) threads.Await(threads.CurrentID());
+    if (operation == 5) { mutex: sync.Mutex; mutex.Unlock(); }
+    if (operation == 6) { group: sync.WaitGroup; group.Done(); }
+    if (operation == 7) { group: sync.WaitGroup; group.Add(9223372036854775807); group.Add(1); }
+    if (operation == 8) { job: func(); threads.Spawn(job); }
+    unexpected = true;
+}
+func main() {
+    args := os.Args();
+    mode := args[1];
+    require(threads.CurrentID() == 0);
+    if (mode == "exit") {
+        threads.Spawn(func() { for (;;) {} });
+        os.Exit(23);
+        panic "Exit returned";
+    }
+    if (mode == "worker-exit") {
+        threads.Spawn(func() { os.Exit(24); });
+        threads.Yield();
+        panic "Exit returned";
+    }
+    if (mode == "main-return" || mode == "main-kill") {
+        threads.Spawn(func() {
+            threads.Await(0);
+            require(threads.IsDone(0));
+            io.Println("OK").unwrap();
+        });
+        if (mode == "main-kill") threads.Kill(0);
+        threads.Return();
+        panic "main Return resumed";
+    }
+    if (mode == "worker-kill-main") {
+        threads.Spawn(func() { pause(); threads.Kill(0); threads.Await(0); io.Println("OK").unwrap(); });
+        for (;;) {}
+    }
+    if (mode == "shutdown") {
+        threads.Spawn(func() { pause(); io.Println("OK").unwrap(); });
+        return;
+    }
+    if (mode == "main-panic") {
+        threads.Spawn(func() { threads.Yield(); });
+        panic "main failed";
+    }
+    if (mode == "worker-panic") {
+        threads.Spawn(func() { panic "worker failed"; });
+        threads.Yield();
+        return;
+    }
+    if (mode == "basic") {
+        count := 0;
+        mutex: sync.Mutex;
+        done: sync.WaitGroup;
+        done.Add(12);
+        ids := int[]{};
+        for (i := 0; i < 12; i++) {
+            id := threads.Spawn(func() {
+                defer done.Done();
+                require(threads.CurrentID() > 0);
+                for (j := 0; j < 2000; j++) {
+                    mutex.Lock();
+                    count++;
+                    mutex.Unlock();
+                }
+            });
+            require(id > 0);
+            if (i > 0) require(id > ids[i - 1]);
+            ids.append(id);
+        }
+        done.Wait();
+        for (index, id := range ids) {
+            threads.Await(id);
+            threads.Await(id);
+            require(threads.IsDone(id));
+            threads.Wake(id);
+            threads.Kill(id);
+        }
+        require(count == 24000);
+        require(mutex.TryLock());
+        require(!mutex.TryLock());
+        mutex.Unlock();
+        mutex.Lock();
+        unlocked := threads.Spawn(func() { mutex.Unlock(); });
+        threads.Await(unlocked);
+        require(mutex.TryLock()); mutex.Unlock();
+        done.Add(1);
+        id := threads.Spawn(func() { done.Done(); });
+        done.Wait(); threads.Await(id);
+    }
+    if (mode == "return") {
+        done: sync.WaitGroup;
+        done.Add(9);
+        id := threads.Spawn(func() { returned(&done, 8); });
+        done.Wait(); threads.Await(id);
+    }
+    if (mode == "return-defer") {
+        done: sync.WaitGroup;
+        done.Add(1);
+        id := threads.Spawn(func() { returnFromDefer(&done); panic "deferred Return resumed"; });
+        threads.Await(id); done.Wait();
+    }
+    if (mode == "kill" || mode == "kill-goto") {
+        ready: sync.WaitGroup;
+        ready.Add(1);
+        finished: sync.WaitGroup;
+        finished.Add(1);
+        mutex: sync.Mutex;
+        id := threads.Spawn(func() {
+            defer finished.Done();
+            mutex.Lock();
+            defer mutex.Unlock();
+            ready.Done();
+            if (mode == "kill-goto") {
+                again: goto again;
+            }
+            for (;;) {}
+        });
+        ready.Wait();
+        threads.Kill(id); threads.Await(id); finished.Wait();
+        require(mutex.TryLock()); mutex.Unlock();
+    }
+    if (mode == "yield" || mode == "kill-yield") {
+        gate: sync.Mutex;
+        gate.Lock();
+        ready: sync.WaitGroup;
+        ready.Add(1);
+        id := threads.Spawn(func() { ready.Done(); gate.Lock(); gate.Unlock(); threads.Yield(); });
+        ready.Wait();
+        threads.Wake(id); // guaranteed running or waiting on gate, never yielded
+        gate.Unlock();
+        pause();
+        require(!threads.IsDone(id)); // early wake did not save a token
+        if (mode == "kill-yield") threads.Kill(id);
+        else {
+            // Wake is intentionally lossy until the worker actually parks.
+            for (; !threads.IsDone(id);) { threads.Wake(id); pause(); }
+        }
+        threads.Await(id);
+    }
+    if (mode == "yield-main") {
+        id := threads.Spawn(func() { pause(); threads.Wake(0); });
+        threads.Yield(); threads.Await(id);
+    }
+    if (mode == "kill-lock" || mode == "kill-group" || mode == "kill-await") {
+        mutex: sync.Mutex;
+        mutex.Lock();
+        blocked: sync.WaitGroup;
+        blocked.Add(1);
+        target := threads.Spawn(func() { blocked.Wait(); });
+        ready: sync.WaitGroup;
+        ready.Add(1);
+        id := threads.Spawn(func() {
+            ready.Done();
+            if (mode == "kill-lock") { mutex.Lock(); mutex.Unlock(); }
+            if (mode == "kill-group") blocked.Wait();
+            if (mode == "kill-await") threads.Await(target);
+        });
+        ready.Wait(); pause(); threads.Kill(id); threads.Await(id);
+        mutex.Unlock(); blocked.Done(); threads.Await(target);
+    }
+    if (mode == "awaiters") {
+        gate: sync.WaitGroup;
+        gate.Add(1);
+        target := threads.Spawn(func() { gate.Wait(); });
+        ids := int[]{};
+        for (i := 0; i < 8; i++) ids.append(threads.Spawn(func() { threads.Await(target); }));
+        gate.Done();
+        for (index, id := range ids) threads.Await(id);
+        threads.Await(target);
+    }
+    if (mode == "closures") {
+        ids := int[]{};
+        for (i := 0; i < 8; i++) ids.append(threads.Spawn(func() {
+            for (j := 0; j < 1000; j++) {
+                text := "hello";
+                callback := func() string { return text + "!"; };
+                require(callback() == "hello!");
+            }
+        }));
+        for (index, id := range ids) threads.Await(id);
+    }
+    if (mode == "invalid") for (i := 0; i < 9; i++) { invalid(i); require(!unexpected); }
+    io.Println("OK").unwrap();
+}

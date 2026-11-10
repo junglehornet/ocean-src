@@ -203,3 +203,16 @@ unchanged.
 `io.Sprint` and the print/format functions support unsigned `uint`/`u64`,
 `u32`, `u16`, and `u8` values as decimal strings across their full ranges,
 including 18446744073709551615 for `uint`/`u64`.
+
+## Native threads and synchronization
+
+`threads` provides native function spawning, completion queries, joins, explicit
+parking/waking, and cooperative termination. Main has ID 0. `sync` supplies
+zero-value mutexes and wait groups. `os.Exit(code)` immediately terminates the
+whole process and all threads, without running deferred calls.
+
+Use these packages with the matching updated compiler. Linux/macOS use pthreads
+and Windows uses Win32 APIs; Wasm rejects native threading and synchronization.
+Only programs requiring the native runtime receive it and POSIX `-pthread`
+linking. See [threads](threads/README.md) and [sync](sync/README.md) for API,
+cancellation, ownership, and shutdown behavior.

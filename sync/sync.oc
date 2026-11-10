@@ -1,0 +1,26 @@
+package sync;
+
+extern void ocean_threads_mutex_lock(*void state);
+extern i32 ocean_threads_mutex_try_lock(*void state);
+extern i32 ocean_threads_mutex_unlock(*void state);
+extern i32 ocean_threads_group_add(*void state, int delta);
+extern void ocean_threads_group_wait(*void state);
+
+// Zero values are ready to use. Keep at a stable address; never copy after use.
+struct Mutex { state uint; }
+func (mutex *Mutex) Lock() { extern.ocean_threads_mutex_lock(&mutex.state); }
+func (mutex *Mutex) TryLock() bool { return extern.ocean_threads_mutex_try_lock(&mutex.state) != 0; }
+func (mutex *Mutex) Unlock() {
+    if (extern.ocean_threads_mutex_unlock(&mutex.state) < 0) panic "unlock of an unlocked Mutex";
+}
+
+// Add work before spawning it. Reuse only after previous Wait calls return.
+struct WaitGroup { state uint; }
+func (group *WaitGroup) Add(delta int) {
+    status := extern.ocean_threads_group_add(&group.state, delta);
+    if (status == -1) panic "negative WaitGroup counter";
+    if (status == -2) panic "WaitGroup counter overflow";
+    if (status == -3) panic "WaitGroup reused before Wait returned";
+}
+func (group *WaitGroup) Done() { group.Add(-1); }
+func (group *WaitGroup) Wait() { extern.ocean_threads_group_wait(&group.state); }
