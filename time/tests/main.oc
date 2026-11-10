@@ -1,0 +1,13 @@
+package main;
+
+import "time";
+import "os";
+import "io";
+
+func main() {
+    if (time.Nanosecond != 1 || time.Microsecond != 1000 ||
+        time.Millisecond != 1000000 || time.Second != 1000000000) panic "incorrect time units";
+    args := os.Args();
+    duration := len(args) > 1 ? io.ParseInt(args[1]).unwrap() : 10 * time.Millisecond;
+    time.Sleep(duration);
+}

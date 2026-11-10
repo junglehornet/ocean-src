@@ -1,0 +1,85 @@
+package tui;
+
+import "os";
+
+// POSIX outputs need no mode change; Windows consoles require VT output.
+func outputMode(handle int) Result<int> {
+    result := 0;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        lea rdx, [rsp + 56]
+        mov dword ptr [rdx], 0
+        call GetConsoleMode
+        test eax, eax
+        jz 1f
+        mov eax, dword ptr [rsp + 56]
+        jmp 2f
+        1: mov rax, -1
+        2:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        add x1, sp, #64
+        str wzr, [x1]
+        bl GetConsoleMode
+        cbz w0, 1f
+        ldr w22, [sp, #64]
+        b 2f
+        1: mov x22, #-1
+        2:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+    if (result < 0) return Result<int>.error("could not read console output mode");
+    return Result<int>.value(result);
+}
+
+func setOutputMode(handle int, mode int) Result<bool> {
+    result := 1;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        mov r13, ${mode}
+        sub rsp, 48
+        mov rcx, r12
+        mov edx, r13d
+        call SetConsoleMode
+        add rsp, 48
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        ldr x20, ${mode}
+        sub sp, sp, #64
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov w1, w20
+        bl SetConsoleMode
+        mov x21, x0
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #64
+        str x21, ${result}
+    }
+    if (result == 0) return Result<bool>.error("could not set console output mode");
+    return Result<bool>.value(true);
+}
+func restoreOutputMode(output os.File, mode int) { setOutputMode(output.NativeHandle(), mode).unwrap(); }

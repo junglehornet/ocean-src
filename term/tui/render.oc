@@ -1,0 +1,76 @@
+package tui;
+
+import "os";
+import "term";
+
+// Terminal column approximation for common combining and East Asian scalars.
+// Grapheme clustering and emoji ZWJ composition are not implemented.
+func columns(scalar int) int {
+    if ((scalar >= 768 && scalar <= 879) || (scalar >= 6832 && scalar <= 6911) ||
+        (scalar >= 7616 && scalar <= 7679) || (scalar >= 65024 && scalar <= 65039) ||
+        (scalar >= 65056 && scalar <= 65071) || scalar == 8205) return 0;
+    if ((scalar >= 4352 && scalar <= 4447) || scalar == 9001 || scalar == 9002 ||
+        (scalar >= 11904 && scalar <= 42191) || (scalar >= 44032 && scalar <= 55203) ||
+        (scalar >= 63744 && scalar <= 64255) || (scalar >= 65040 && scalar <= 65049) ||
+        (scalar >= 65072 && scalar <= 65135) || (scalar >= 65281 && scalar <= 65376) ||
+        (scalar >= 65504 && scalar <= 65510) || (scalar >= 127744 && scalar <= 129791) ||
+        (scalar >= 131072 && scalar <= 262141)) return 2;
+    return 1;
+}
+func byteText(byte i8) string { bytes := i8[]{byte}; return bytes -> string; }
+func frame(view string, size term.Size) (string, int) {
+    result := "";
+    row := 0;
+    column := 0;
+    clipped := false;
+    // Leave the last column free to avoid autowrap and cursor accounting drift.
+    width := size.Width > 1 ? size.Width - 1 : 0;
+    height := size.Height > 0 ? size.Height : 1;
+    for (i := 0; i < len(view);) {
+        byte := (view[i] -> u8) -> int;
+        if (byte == 10) {
+            if (row + 1 >= height) break;
+            result += "\r\n"; row++; column = 0; clipped = false; i++; continue;
+        }
+        if (byte == 27) {
+            // View permits SGR colors/styles; ignore terminal control sequences.
+            end := i + 1;
+            if (end < len(view) && view[end] == 91) {
+                end++;
+                for (; end < len(view) && end - i < 64 && view[end] >= 32 && view[end] <= 63; end++) {}
+                if (end < len(view) && view[end] >= 64 && view[end] <= 126) {
+                    if (view[end] == 109) for (j := i; j <= end; j++) result += byteText(view[j]);
+                    i = end + 1; continue;
+                }
+            }
+            i++; continue;
+        }
+        if (byte == 9) {
+            spaces := 8 - column % 8;
+            for (j := 0; j < spaces && column < width && !clipped; j++) { result += " "; column++; }
+            i++; continue;
+        }
+        if (byte < 32 || byte == 127) { i++; continue; }
+        length := byte < 128 ? 1 : (byte < 224 ? 2 : (byte < 240 ? 3 : 4));
+        if (i + length > len(view)) break;
+        scalar := byte < 128 ? byte : (byte & (length == 2 ? 31 : (length == 3 ? 15 : 7)));
+        for (j := 1; j < length; j++) scalar = scalar * 64 + ((view[i + j] -> u8) -> int & 63);
+        count := columns(scalar);
+        if (column + count > width) clipped = true;
+        if (!clipped) {
+            for (j := 0; j < length; j++) result += byteText(view[i + j]);
+            column += count;
+        }
+        i += length;
+    }
+    return result + "\x1b[0m", row;
+}
+func render(output os.File, view string, previousRows int, alternate bool, size term.Size) Result<int> {
+    prefix := "\r";
+    if (alternate) prefix = "\x1b[H";
+    else for (i := 0; i < previousRows; i++) prefix += "\x1b[1A";
+    text, rows := frame(view, size);
+    written := output.Write(prefix + "\x1b[0m\x1b[J" + text);
+    if (written == Result<int>.error) return Result<int>.error(written.(Result<int>.error));
+    return Result<int>.value(rows);
+}

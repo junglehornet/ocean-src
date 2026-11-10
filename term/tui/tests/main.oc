@@ -1,0 +1,156 @@
+package main;
+import "term/tui";
+import "threads";
+import "io";
+import "os";
+import "time";
+
+func require(ok bool) { if (!ok) panic "tui assertion failed"; }
+struct dataMsg { value int; }
+struct testModel { count int; mode string; owner int; }
+struct orderMsg { value int; }
+struct payloadMsg { text string; }
+func (model testModel) Init() tui.Cmd {
+    require(threads.CurrentID() == model.owner);
+    if (model.mode == "command-panic") return func() tui.Msg { panic "command failed"; return tui.NoneMsg{}; };
+    if (model.mode == "async") {
+        return tui.Batch(
+            func() tui.Msg { require(threads.CurrentID() != 0); return dataMsg{1}; },
+            tui.Tick(25 * time.Millisecond, dataMsg{2}),
+            tui.Sequence(func() tui.Msg { return dataMsg{4}; }, func() tui.Msg { return dataMsg{8}; })
+        );
+    }
+    if (model.mode == "order") return tui.Sequence(
+        tui.Batch(tui.Tick(30 * time.Millisecond, orderMsg{1}), tui.Tick(10 * time.Millisecond, orderMsg{1})),
+        func() tui.Msg { return orderMsg{2}; }
+    );
+    if (model.mode == "stress") {
+        commands := tui.Cmd[]{};
+        for (i := 0; i < 32; i++) {
+            commands.append(func() tui.Msg {
+                text := "";
+                for (j := 0; j < 100; j++) text += "owned message\n";
+                return payloadMsg{text};
+            });
+        }
+        return tui.Batch(commands...);
+    }
+    if (model.mode == "cancel") return tui.Batch(func() tui.Msg { threads.Yield(); return tui.NoneMsg{}; }, tui.Tick(50 * time.Millisecond, tui.QuitMsg{}));
+    return tui.NoCmd;
+}
+func (model testModel) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+    require(threads.CurrentID() == model.owner);
+    switch (event := message.(type)) {
+        case dataMsg:
+            model.count += event.value;
+            if (model.count == 15) return model, tui.Quit;
+        case orderMsg:
+            if (event.value == 1) model.count++;
+            else { require(model.count == 2); return model, tui.Quit; }
+        case payloadMsg:
+            require(len(event.text) == 1400);
+            model.count++;
+            if (model.count == 32) return model, tui.Quit;
+        case tui.WindowSizeMsg:
+            model.count = event.Width;
+        case tui.KeyMsg:
+            if (model.mode == "panic") panic "update failed";
+            if (event.Text == "q" || event.Key == "ctrl+c") return model, tui.Quit;
+            if (event.Key == "up") model.count++;
+            if (event.Key == "rune") model.count += 10;
+            if (event.Key == "esc") model.count += 100;
+            if (event.Alt) model.count += 1000;
+    }
+    return model, tui.NoCmd;
+}
+func (model testModel) View() string {
+    require(threads.CurrentID() == model.owner);
+    return "VIEW:" + io.Sprint(model.count) + "\nready";
+}
+struct pointerModel { count int; }
+func (model *pointerModel) Init() tui.Cmd { return tui.Tick(5 * time.Millisecond, dataMsg{3}); }
+func (model *pointerModel) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+    model.count++;
+    return model, tui.Quit;
+}
+func (model *pointerModel) View() string { return "pointer"; }
+func mark(done *bool) { *done = true; }
+struct cancelModel { done *bool; }
+func (model cancelModel) Init() tui.Cmd {
+    done := model.done;
+    return tui.Batch(tui.Sequence(tui.Batch(func() tui.Msg {
+        defer mark(done);
+        time.Sleep(3600 * time.Second);
+        return tui.NoneMsg{};
+    })), tui.Tick(100 * time.Millisecond, tui.QuitMsg{}));
+}
+func (model cancelModel) Update(message tui.Msg) (tui.Model, tui.Cmd) { return model, tui.NoCmd; }
+func (model cancelModel) View() string { return ""; }
+struct ioModel { file os.File; output os.File; text string; }
+func (model ioModel) Init() tui.Cmd { return tui.Read(model.file, 1024); }
+func (model ioModel) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+    switch (event := message.(type)) {
+        case tui.ReadMsg:
+            require(!event.End);
+            model.text = event.Bytes -> string;
+            return model, tui.Write(model.output, model.text);
+        case tui.WriteMsg:
+            require(event.Bytes == len(model.text));
+            return model, tui.Quit;
+        case tui.ErrorMsg: panic event.Error;
+    }
+    return model, tui.NoCmd;
+}
+func (model ioModel) View() string { return model.text; }
+func main() {
+    args := os.Args();
+    mode := len(args) > 1 ? args[1] : "async";
+    if (mode == "inline") {
+        program := tui.NewProgram(testModel{mode: mode, owner: threads.CurrentID()});
+        program.Run().unwrap();
+        return;
+    }
+    if (mode == "quit") {
+        program := tui.NewProgram(testModel{mode: mode, owner: threads.CurrentID()}, tui.Options{Headless: true});
+        require(program.Quit());
+        program.Run().unwrap();
+        require(!program.Quit());
+        return;
+    }
+    if (mode == "cancel-tree") {
+        done := false;
+        program := tui.NewProgram(cancelModel{&done}, tui.Options{Headless: true});
+        program.Run().unwrap();
+        require(done);
+        return;
+    }
+    if (mode == "pointer") {
+        model: pointerModel;
+        program := tui.NewProgram(&model, tui.Options{Headless: true});
+        final := program.Run().unwrap();
+        require(model.count == 1);
+        require(final.(*pointerModel) == &model);
+        return;
+    }
+    if (mode == "io") {
+        input := os.Open(args[2], os.FileMode.Read).unwrap();
+        defer input.Close();
+        output := os.Open(args[3], os.FileMode.Write).unwrap();
+        defer output.Close();
+        program := tui.NewProgram(ioModel{file: input, output: output}, tui.Options{Headless: true});
+        final := program.Run().unwrap();
+        require(final.(ioModel).text == "asynchronous I/O\n");
+        return;
+    }
+    program := tui.NewProgram(testModel{mode: mode, owner: threads.CurrentID()}, tui.Options{Headless: mode == "async" || mode == "cancel" || mode == "command-panic" || mode == "send" || mode == "order" || mode == "stress", AltScreen: mode != "inline"});
+    if (mode == "send") { program.Send(dataMsg{15}); }
+    result := program.Run();
+    if (mode == "command-panic") {
+        require(result == Result<tui.Model>.error);
+        return;
+    }
+    final := result.unwrap();
+    if (mode == "async" || mode == "send") require(final.(testModel).count == 15);
+    require(!program.Send(dataMsg{1}));
+    require(program.Run() == Result<tui.Model>.error);
+}

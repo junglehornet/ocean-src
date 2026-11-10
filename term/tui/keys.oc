@@ -1,0 +1,126 @@
+package tui;
+
+import "io";
+
+struct keyDecoder { pending i8[]; idle int; }
+
+func (decoder *keyDecoder) take(count int) string {
+    bytes := i8[]{};
+    for (i := 0; i < count; i++) bytes.append(decoder.pending.remove(0));
+    decoder.idle = 0;
+    return bytes -> string;
+}
+func special(sequence string) string {
+    switch (sequence) {
+        case "[A": return "up";
+        case "[B": return "down";
+        case "[C": return "right";
+        case "[D": return "left";
+        case "[H": return "home";
+        case "[F": return "end";
+        case "[Z": return "shift+tab";
+        case "OA": return "up";
+        case "OB": return "down";
+        case "OC": return "right";
+        case "OD": return "left";
+        case "OH": return "home";
+        case "OF": return "end";
+        case "OP": return "f1";
+        case "OQ": return "f2";
+        case "OR": return "f3";
+        case "OS": return "f4";
+        case "[1~": return "home";
+        case "[2~": return "insert";
+        case "[3~": return "delete";
+        case "[4~": return "end";
+        case "[5~": return "pgup";
+        case "[6~": return "pgdown";
+        case "[7~": return "home";
+        case "[8~": return "end";
+        case "[15~": return "f5";
+        case "[17~": return "f6";
+        case "[18~": return "f7";
+        case "[19~": return "f8";
+        case "[20~": return "f9";
+        case "[21~": return "f10";
+        case "[23~": return "f11";
+        case "[24~": return "f12";
+    }
+    return "unknown";
+}
+
+// Feed complete UTF-8 scalars and escape sequences to Update. An ambiguous
+// Escape is held for ~30ms; split UTF-8 scalars are held until complete.
+func (decoder *keyDecoder) dispatch(program *Program, end bool) {
+    decoder.idle++;
+    for (len(decoder.pending) > 0) {
+        first := (decoder.pending[0] -> u8) -> int;
+        alt := false;
+        offset := 0;
+        if (first == 27) {
+            if (len(decoder.pending) == 1) {
+                if (!end && decoder.idle < 6) return;
+                decoder.take(1);
+                program.Send(KeyMsg{"esc", "", false});
+                continue;
+            }
+            second := decoder.pending[1];
+            if (second == 91 || second == 79) {
+                length := 0;
+                for (i := 2; i < len(decoder.pending); i++) {
+                    byte := decoder.pending[i];
+                    if (byte >= 64 && byte <= 126) { length = i + 1; break; }
+                }
+                if (length == 0 && len(decoder.pending) < 64 && !end && decoder.idle < 6) return;
+                if (length == 0) length = len(decoder.pending);
+                decoder.take(1);
+                sequence := decoder.take(length - 1);
+                program.Send(KeyMsg{special(sequence), "", false});
+                continue;
+            }
+            alt = true; offset = 1;
+            first = (decoder.pending[1] -> u8) -> int;
+        }
+        key := "";
+        if (first == 13 || first == 10) key = "enter";
+        else if (first == 9) key = "tab";
+        else if (first == 127 || first == 8) key = "backspace";
+        else if (first == 27) key = "esc";
+        else if (first == 0) key = "ctrl+space";
+        else if (first < 27) {
+            character: i8[] = {(first + 96) -> i8};
+            key = "ctrl+" + (character -> string);
+        } else if (first < 32) key = "ctrl+" + io.Sprint(first);
+        if (key != "") {
+            decoder.take(offset + 1);
+            program.Send(KeyMsg{key, "", alt});
+            continue;
+        }
+        length := 1;
+        if (first >= 194 && first <= 223) length = 2;
+        else if (first >= 224 && first <= 239) length = 3;
+        else if (first >= 240 && first <= 244) length = 4;
+        else if (first >= 128) {
+            decoder.take(offset + 1);
+            program.Send(KeyMsg{"rune", "�", alt});
+            continue;
+        }
+        if (len(decoder.pending) < offset + length && !end) return;
+        valid := len(decoder.pending) >= offset + length;
+        scalar := first & (length == 2 ? 31 : (length == 3 ? 15 : 7));
+        for (i := 1; valid && i < length; i++) {
+            next := (decoder.pending[offset + i] -> u8) -> int;
+            if (next < 128 || next > 191) valid = false;
+            scalar = scalar * 64 + (next & 63);
+        }
+        if (length > 1 && (scalar < (length == 2 ? 128 : (length == 3 ? 2048 : 65536)) || scalar > 1114111 || (scalar >= 55296 && scalar <= 57343))) valid = false;
+        if (offset > 0) decoder.take(offset);
+        if (!valid) {
+            decoder.take(1);
+            program.Send(KeyMsg{"rune", "�", alt});
+        } else {
+            text := decoder.take(length);
+            program.Send(KeyMsg{first == 32 ? "space" : "rune", text, alt});
+        }
+    }
+}

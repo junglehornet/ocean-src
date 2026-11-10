@@ -1,0 +1,232 @@
+package tui;
+
+import "os";
+import "term";
+import "threads";
+import "sync";
+
+// Models may be values (return a replacement from Update) or borrowed pointers.
+// All three methods run on the application thread, never command workers.
+interface Model {
+    Init() Cmd;
+    Update(message Msg) (Model, Cmd);
+    View() string;
+}
+struct Options {
+    // Headless disables terminal input, raw mode, and all rendering.
+    Headless bool;
+    // Alternate screen is opt-in. The default redraws from the current line.
+    AltScreen bool;
+}
+struct commandFailure { error string; }
+struct Program {
+    model Model;
+    options Options;
+    gate sync.Mutex;
+    // An owning map keeps boxed payloads alive after the producer returns.
+    // Integer keys preserve FIFO order without shifting the remaining messages.
+    messages map[int]Msg;
+    head int;
+    tail int;
+    workers int[];
+    running bool;
+    finished bool;
+}
+
+// A Program must remain at a stable address. Do not copy it after first use.
+func NewProgram(model Model, options ...Options) Program {
+    if (len(options) > 1) panic "NewProgram accepts at most one Options value";
+    settings: Options;
+    if (len(options) == 1) settings = options[0];
+    return Program{model: model, options: settings};
+}
+
+// Send is safe from commands and other threads; false means Run has finished.
+// Messages sent before Run are queued. NoneMsg is ignored by the event loop.
+func (program *Program) Send(message Msg) bool {
+    program.gate.Lock();
+    defer program.gate.Unlock();
+    if (program.finished) return false;
+    tail := program.tail;
+    program.messages[tail] = message;
+    program.tail++;
+    return true;
+}
+func (program *Program) Quit() bool { return program.Send(QuitMsg{}); }
+func (program *Program) pop() (Msg, bool) {
+    program.gate.Lock();
+    defer program.gate.Unlock();
+    if (len(program.messages) == 0) return NoneMsg{}, false;
+    head := program.head;
+    message := program.messages[head];
+    delete(program.messages, program.head);
+    program.head++;
+    if (program.head == program.tail) { program.head = 0; program.tail = 0; }
+    return message, true;
+}
+func (program *Program) start(command Cmd) {
+    if (command == zero(Cmd) || command == NoCmd) return;
+    program.workers.append(threads.Spawn(func() { program.execute(command); }));
+}
+func (program *Program) execute(command Cmd) {
+    defer func() {
+        failure := recover();
+        switch (text := failure.(type)) {
+            case string: program.Send(commandFailure{text});
+        }
+    }();
+    if (command == zero(Cmd) || command == NoCmd) return;
+    message := command();
+    // Composite commands retain ownership of their children until completion.
+    // Cancelling the parent also cancels and joins its descendants.
+    switch (value := message.(type)) {
+        case sequenceMsg:
+            for (i := 0; i < len(value.commands); i++) program.execute(value.commands[i]);
+            return;
+        case batchMsg:
+            children := int[]{};
+            defer stopWorkers(&children);
+            for (i := 0; i < len(value.commands); i++) {
+                child := value.commands[i];
+                children.append(threads.Spawn(func() { program.execute(child); }));
+            }
+            for (i := 0; i < len(children); i++) threads.Await(children[i]);
+            return;
+    }
+    program.Send(message);
+}
+func stopWorkers(workers *int[]) {
+    for (i := 0; i < len(*workers); i++) threads.Kill((*workers)[i]);
+    for (i := 0; i < len(*workers); i++) threads.Await((*workers)[i]);
+}
+func (program *Program) reap() {
+    for (i := len(program.workers) - 1; i >= 0; i--) {
+        id := program.workers[i];
+        if (threads.IsDone(id)) { threads.Await(id); program.workers.remove(i); }
+    }
+}
+func (program *Program) finish() {
+    program.gate.Lock();
+    program.finished = true;
+    program.running = false;
+    program.gate.Unlock();
+    for (i := 0; i < len(program.workers); i++) threads.Kill(program.workers[i]);
+    for (i := 0; i < len(program.workers); i++) threads.Await(program.workers[i]);
+    program.workers = {};
+}
+
+func restore(input os.File) { term.Restore(input).unwrap(); }
+func leaveScreen(output os.File, alternate bool) {
+    output.Write(alternate ? "\x1b[?25h\x1b[?1049l" : "\x1b[?25h\r\n").unwrap();
+}
+// Run is single-use. Init, Update, and View run serially on the calling thread.
+// All workers are cancelled and joined before returning or unwinding a panic.
+func (program *Program) Run() Result<Model> {
+    program.gate.Lock();
+    if (program.running || program.finished) {
+        program.gate.Unlock();
+        return Result<Model>.error("tui Program may only run once");
+    }
+    program.running = true;
+    program.gate.Unlock();
+    // Terminal cleanup is registered below, so it runs before worker joins even
+    // when a command is stuck inside a native call that cannot be cancelled.
+    defer program.finish();
+    input: os.File;
+    output: os.File;
+    size: term.Size;
+    if (!program.options.Headless) {
+        opened := os.Stdin();
+        if (opened == Result<os.File>.error) return Result<Model>.error(opened.(Result<os.File>.error));
+        input = opened.unwrap();
+        opened = os.Stdout();
+        if (opened == Result<os.File>.error) return Result<Model>.error(opened.(Result<os.File>.error));
+        output = opened.unwrap();
+        terminal := term.IsTerminal(output);
+        if (terminal == Result<bool>.error) return Result<Model>.error(terminal.(Result<bool>.error));
+        if (!terminal.unwrap()) return Result<Model>.error("tui output must be a terminal");
+        mode := outputMode(output.NativeHandle());
+        if (mode == Result<int>.error) return Result<Model>.error(mode.(Result<int>.error));
+        enabled := setOutputMode(output.NativeHandle(), mode.unwrap() | 5);
+        if (enabled == Result<bool>.error) return Result<Model>.error(enabled.(Result<bool>.error));
+        defer restoreOutputMode(output, mode.unwrap());
+        measured := term.GetSize(output);
+        if (measured == Result<term.Size>.error) return Result<Model>.error(measured.(Result<term.Size>.error));
+        size = measured.unwrap();
+        raw := term.MakeRaw(input);
+        if (raw == Result<bool>.error) return Result<Model>.error(raw.(Result<bool>.error));
+        defer restore(input);
+        defer leaveScreen(output, program.options.AltScreen);
+        entered := output.Write(program.options.AltScreen ? "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J" : "\x1b[?25l");
+        if (entered == Result<int>.error) return Result<Model>.error(entered.(Result<int>.error));
+        program.Send(WindowSizeMsg{size.Width, size.Height});
+    }
+    // The owning slot also releases replaced model snapshots between updates.
+    state := map[int]Model{0: program.model};
+    program.start(state[0].Init());
+    lastView := map[int]string{0: ""};
+    rows := 0;
+    dirty := true;
+    forcePaint := true;
+    decoder: keyDecoder;
+    ended := false;
+    cycle := 0;
+    for (;;) {
+        // Bound each drain so a producer cannot starve input and rendering.
+        for (count := 0; count < 64; count++) {
+            message, present := program.pop();
+            if (!present) break;
+            skip := false;
+            switch (value := message.(type)) {
+                case QuitMsg: return Result<Model>.value(state[0]);
+                case commandFailure: return Result<Model>.error("tui command panic: " + value.error);
+                case NoneMsg: skip = true;
+            }
+            if (!skip) {
+                model, command := state[0].Update(message);
+                state[0] = model;
+                program.start(command);
+                dirty = true;
+            }
+        }
+        if (dirty && !program.options.Headless) {
+            view := state[0].View();
+            if (view != lastView[0] || forcePaint) {
+                painted := render(output, view, rows, program.options.AltScreen, size);
+                if (painted == Result<int>.error) return Result<Model>.error(painted.(Result<int>.error));
+                rows = painted.unwrap(); lastView[0] = view;
+                forcePaint = false;
+            }
+        }
+        dirty = false;
+        if (!program.options.Headless) {
+            if (!ended) {
+                for (readCount := 0; readCount < 256; readCount++) {
+                    ready := input.PollRead();
+                    if (ready == Result<int>.error) return Result<Model>.error(ready.(Result<int>.error));
+                    if (ready.unwrap() == 0) break;
+                    read := input.Readchunk(1);
+                    if (read == Result<i8[]>.error) return Result<Model>.error(read.(Result<i8[]>.error));
+                    bytes := read.unwrap();
+                    if (len(bytes) == 0) { ended = true; break; }
+                    else { decoder.pending.append(bytes[0]); decoder.idle = 0; }
+                }
+                decoder.dispatch(program, ended);
+                if (ended) program.Send(EOFMsg{});
+            }
+            if (cycle % 20 == 0) {
+                measured := term.GetSize(output);
+                if (measured == Result<term.Size>.error) return Result<Model>.error(measured.(Result<term.Size>.error));
+                current := measured.unwrap();
+                if (current.Width != size.Width || current.Height != size.Height) {
+                    size = current; forcePaint = true; dirty = true;
+                    program.Send(WindowSizeMsg{size.Width, size.Height});
+                }
+            }
+        }
+        program.reap();
+        cycle = (cycle + 1) % 1000000;
+        pause();
+    }
+    return Result<Model>.value(state[0]);
+}

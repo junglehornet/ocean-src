@@ -1,0 +1,25 @@
+package tui;
+
+import "os";
+
+struct ReadMsg { Bytes i8[]; End bool; }
+struct WriteMsg { Bytes int; }
+
+// Use streams opened before Run; each stream must have a single reader/writer.
+// Commands may also implement arbitrary I/O and return application messages.
+func Read(file os.File, count int) Cmd {
+    if (count <= 0) panic "tui.Read requires a positive byte count";
+    return func() Msg {
+        read := file.Readchunk(count);
+        if (read == Result<i8[]>.error) return ErrorMsg{read.(Result<i8[]>.error)};
+        bytes := read.unwrap();
+        return ReadMsg{bytes, len(bytes) == 0};
+    };
+}
+func Write(file os.File, text string) Cmd {
+    return func() Msg {
+        written := file.Write(text);
+        if (written == Result<int>.error) return ErrorMsg{written.(Result<int>.error)};
+        return WriteMsg{written.unwrap()};
+    };
+}

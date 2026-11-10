@@ -216,3 +216,16 @@ and Windows uses Win32 APIs; Wasm rejects native threading and synchronization.
 Only programs requiring the native runtime receive it and POSIX `-pthread`
 linking. See [threads](threads/README.md) and [sync](sync/README.md) for API,
 cancellation, ownership, and shutdown behavior.
+
+## Terminal applications
+
+[`term/tui`](term/tui/README.md) provides a Bubble Tea style application loop
+with a `Model` interface (`Init`, `Update`, `View`), asynchronous `Cmd` effects,
+thread-safe message delivery, keyboard/resize events, and terminal rendering.
+Commands use native threads; updates stay on the application thread. See the
+[counter example](term/tui/examples/counter/main.oc) and package documentation
+for lifecycle, I/O, and cancellation rules.
+
+[`time`](time/README.md) provides `Sleep(nanoseconds int)` and nanosecond-based
+units: `time.Sleep(10 * time.Millisecond)`. Unit values are ordinary exported
+integers, treated as constants by convention until Ocean gains constant declarations.

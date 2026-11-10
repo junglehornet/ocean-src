@@ -1,0 +1,37 @@
+package tui;
+
+import "time";
+
+// User-defined values may be messages too. Only Update owns application state.
+type Msg = any;
+type Cmd = func() Msg;
+struct NoneMsg {}
+struct QuitMsg {}
+struct KeyMsg { Key string; Text string; Alt bool; }
+struct WindowSizeMsg { Width int; Height int; }
+struct EOFMsg {}
+struct ErrorMsg { Error string; }
+struct batchMsg { commands Cmd[]; }
+
+// Use NoCmd for updates without an effect (zero function values also work).
+func NoCmd() Msg { return NoneMsg{}; }
+func Quit() Msg { return QuitMsg{}; }
+func Batch(commands ...Cmd) Cmd {
+    return func() Msg { return batchMsg{commands}; };
+}
+
+// Sequence executes effects in order, delivering each result before starting
+// the next effect. Updates process those results on the application thread.
+struct sequenceMsg { commands Cmd[]; }
+func Sequence(commands ...Cmd) Cmd {
+    return func() Msg { return sequenceMsg{commands}; };
+}
+
+// One-shot timer in nanoseconds. Schedule another Tick from Update to repeat.
+func Tick(nanoseconds int, message Msg) Cmd {
+    if (nanoseconds < 0) panic "negative tui timer duration";
+    return func() Msg {
+        time.Sleep(nanoseconds);
+        return message;
+    };
+}

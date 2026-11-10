@@ -1,0 +1,29 @@
+package main;
+
+import "term/tui";
+import "io";
+import "time";
+
+struct counter { count int; }
+struct tickMsg {}
+func (model counter) Init() tui.Cmd { return tui.Tick(time.Second, tickMsg{}); }
+func (model counter) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+    switch (event := message.(type)) {
+        case tui.KeyMsg:
+            if (event.Key == "ctrl+c" || event.Text == "q") return model, tui.Quit;
+            if (event.Key == "up" || event.Text == "+") model.count++;
+            if (event.Key == "down" || event.Text == "-") model.count--;
+        case tickMsg:
+            model.count++;
+            return model, tui.Tick(time.Second, tickMsg{});
+        case tui.EOFMsg: return model, tui.Quit;
+    }
+    return model, tui.NoCmd;
+}
+func (model counter) View() string {
+    return "Count: " + io.Sprint(model.count) + "\n↑/↓ or +/- to change · q to quit";
+}
+func main() {
+    program := tui.NewProgram(counter{}, tui.Options{AltScreen: true});
+    program.Run().unwrap();
+}

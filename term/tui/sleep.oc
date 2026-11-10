@@ -1,0 +1,6 @@
+package tui;
+
+import "time";
+
+// Short sleeps keep input polling and command cancellation responsive.
+func pause() { time.Sleep(5 * time.Millisecond); }
