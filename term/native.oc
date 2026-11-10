@@ -1,0 +1,197 @@
+package term;
+
+// Kernel ABI: Linux termios (36 bytes), Darwin termios (72 bytes), or a
+// Win32 console mode DWORD. Nine contiguous 64-bit words preserve all 72
+// bytes without relying on Ocean collection headers at the native boundary.
+struct settings { a, b, c, d, e, f, g, h, i int; }
+
+func platform() int {
+    kind := 0;
+    asm x86_64/linux {
+        mov qword ptr ${kind}, 1
+    }
+    asm aarch64/linux {
+        mov x0, #1
+        str x0, ${kind}
+    }
+    asm riscv64/linux {
+        li a0, 1
+        sd a0, ${kind}
+    }
+    asm x86_64/macos {
+        mov qword ptr ${kind}, 2
+    }
+    asm aarch64/macos {
+        mov x0, #2
+        str x0, ${kind}
+    }
+    asm x86_64/windows {
+        mov qword ptr ${kind}, 3
+    }
+    asm aarch64/windows {
+        mov x0, #3
+        str x0, ${kind}
+    }
+    return kind;
+}
+
+// Returns negative errno-style status; -4096 means unsupported target.
+func control(handle int, request int, data *void) int {
+    result := -4096;
+    for (;;) {
+        asm x86_64/linux {
+            mov eax, 16
+            mov rdi, ${handle}
+            mov rsi, ${request}
+            mov rdx, ${data}
+            syscall
+            mov ${result}, rax
+        }
+        asm aarch64/linux {
+            ldr x0, ${handle}
+            ldr x1, ${request}
+            ldr x2, ${data}
+            mov x8, #29
+            svc #0
+            str x0, ${result}
+        }
+        asm riscv64/linux {
+            ld a0, ${handle}
+            ld a1, ${request}
+            ld a2, ${data}
+            li a7, 29
+            ecall
+            sd a0, ${result}
+        }
+        asm x86_64/macos {
+            mov eax, 33554486
+            mov rdi, ${handle}
+            mov rsi, ${request}
+            mov rdx, ${data}
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${result}, rax
+        }
+        asm aarch64/macos {
+            ldr x0, ${handle}
+            ldr x1, ${request}
+            ldr x2, ${data}
+            mov x16, #54
+            svc #128
+            cneg x0, x0, cs
+            str x0, ${result}
+        }
+        if (result != -4) return result;
+    }
+    return result;
+}
+
+// operation: 0 GetConsoleMode, 1 SetConsoleMode, 2 screen buffer info,
+// 3 validate a handle with GetFileType (also accepts redirected streams).
+func console(handle int, operation int, data *void) int {
+    result := -4096;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        mov r13, ${operation}
+        mov r14, ${data}
+        sub rsp, 48
+        mov rcx, r12
+        mov rdx, r14
+        cmp r13, 3
+        jne 8f
+        call GetFileType
+        jmp 3f
+        8: cmp r13, 2
+        je 2f
+        cmp r13, 1
+        je 1f
+        call GetConsoleMode
+        jmp 3f
+        1: mov edx, dword ptr [r14]
+        call SetConsoleMode
+        jmp 3f
+        2: call GetConsoleScreenBufferInfo
+        3: test eax, eax
+        jnz 4f
+        call GetLastError
+        cmp eax, 6
+        je 5f
+        cmp eax, 1
+        je 6f
+        cmp eax, 50
+        je 6f
+        mov rax, -5
+        jmp 7f
+        5: mov rax, -9
+        jmp 7f
+        6: mov rax, -25
+        jmp 7f
+        4: xor eax, eax
+        7: add rsp, 48
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        ldr x20, ${operation}
+        ldr x21, ${data}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, x21
+        cmp x20, #3
+        b.ne 8f
+        bl GetFileType
+        b 3f
+        8: cmp x20, #2
+        b.eq 2f
+        cmp x20, #1
+        b.eq 1f
+        bl GetConsoleMode
+        b 3f
+        1: ldr w1, [x21]
+        bl SetConsoleMode
+        b 3f
+        2: bl GetConsoleScreenBufferInfo
+        3: cbnz w0, 4f
+        bl GetLastError
+        cmp w0, #6
+        b.eq 5f
+        cmp w0, #1
+        b.eq 6f
+        cmp w0, #50
+        b.eq 6f
+        mov x22, #-5
+        b 7f
+        5: mov x22, #-9
+        b 7f
+        6: mov x22, #-25
+        b 7f
+        4: mov x22, #0
+        7:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+    return result;
+}
+
+func word(state settings, offset int, width int) int {
+    raw: *void = &state;
+    bytes := raw -> buffer<u8>;
+    value := 0;
+    for (i := 0; i < width; i++) value |= (bytes[offset + i]->int) << (8 * i);
+    return value;
+}
+func putWord(state *settings, offset int, width int, value int) {
+    raw: *void = state;
+    bytes := raw -> buffer<u8>;
+    for (i := 0; i < width; i++) bytes[offset + i] = (value >> (8 * i))->u8;
+}

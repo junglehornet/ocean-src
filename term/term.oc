@@ -1,0 +1,154 @@
+package term;
+
+import "os";
+
+struct Size { Width int; Height int; }
+struct savedTerminal { file os.File; state settings; active bool; }
+saved: savedTerminal[];
+
+func failure(status int) string {
+    if (status == -4096) return "terminal operations are unsupported on this architecture/platform";
+    if (status == -9) return "invalid terminal descriptor";
+    if (status == -25) return "descriptor is not a terminal";
+    return "terminal operation failed";
+}
+
+func getSettings(file os.File) Result<settings> {
+    if (!file.IsOpen()) return Result<settings>.error("file is closed");
+    state: settings;
+    data: *void = &state;
+    kind := platform();
+    status := kind == 3 ? console(file.NativeHandle(), 0, data) : control(file.NativeHandle(), kind == 2 ? 1078490131 : 21505, data);
+    if (status < 0) return Result<settings>.error(failure(status));
+    return Result<settings>.value(state);
+}
+func setSettings(file os.File, state settings) Result<bool> {
+    if (!file.IsOpen()) return Result<bool>.error("file is closed");
+    data: *void = &state;
+    kind := platform();
+    status := kind == 3 ? console(file.NativeHandle(), 1, data) : control(file.NativeHandle(), kind == 2 ? 2152231956 : 21506, data);
+    if (status < 0) return Result<bool>.error(failure(status));
+    return Result<bool>.value(true);
+}
+
+// Width and Height are character columns and rows, not pixels.
+func GetSize(file os.File) Result<Size> {
+    if (!file.IsOpen()) return Result<Size>.error("file is closed");
+    state: settings;
+    data: *void = &state;
+    kind := platform();
+    status := kind == 3 ? console(file.NativeHandle(), 2, data) : control(file.NativeHandle(), kind == 2 ? 1074295912 : 21523, data);
+    if (status < 0) return Result<Size>.error(failure(status));
+    if (kind == 3) {
+        // Visible console window, rather than the scrollback buffer dimensions.
+        width := (word(state, 14, 2)->int) - (word(state, 10, 2)->int) + 1;
+        height := (word(state, 16, 2)->int) - (word(state, 12, 2)->int) + 1;
+        return Result<Size>.value(Size{width, height});
+    }
+    return Result<Size>.value(Size{word(state, 2, 2)->int, word(state, 0, 2)->int});
+}
+
+// A valid pipe or regular file yields false; invalid descriptors yield errors.
+func IsTerminal(file os.File) Result<bool> {
+    if (!file.IsOpen()) return Result<bool>.error("file is closed");
+    state: settings;
+    data: *void = &state;
+    kind := platform();
+    status := kind == 3 ? console(file.NativeHandle(), 0, data) : control(file.NativeHandle(), kind == 2 ? 1078490131 : 21505, data);
+    if (status == -25) return Result<bool>.value(false);
+    if (kind == 3 && status == -9 && console(file.NativeHandle(), 3, data) == 0) return Result<bool>.value(false);
+    if (status < 0) return Result<bool>.error(failure(status));
+    return Result<bool>.value(true);
+}
+
+func savedIndex(file os.File) int {
+    for (i := 0; i < len(saved); i++) {
+        if (saved[i].active && !saved[i].file.IsOpen()) saved[i].active = false;
+        if (saved[i].active && saved[i].file.NativeHandle() == file.NativeHandle()) return i;
+    }
+    return -1;
+}
+
+// Repeated MakeRaw calls preserve the first saved settings. Restore once.
+func MakeRaw(file os.File) Result<bool> {
+    original := getSettings(file);
+    if (original == Result<settings>.error) return Result<bool>.error(original.(Result<settings>.error));
+    state := original.unwrap();
+    kind := platform();
+    if (kind == 3) {
+        // Disable processed/line/echo input, mouse/window events, quick edit;
+        // enable extended flags and virtual-terminal input.
+        putWord(&state, 0, 4, (word(state, 0, 4) & ~127) | 640);
+    } else {
+        width := kind == 2 ? 8 : 4;
+        putWord(&state, 0, width, word(state, 0, width) & ~(kind == 2 ? 1003 : 1515));
+        putWord(&state, width, width, word(state, width, width) & ~1);
+        putWord(&state, width * 2, width, (word(state, width * 2, width) & ~(kind == 2 ? 4864 : 304)) | (kind == 2 ? 768 : 48));
+        putWord(&state, width * 3, width, word(state, width * 3, width) & ~(kind == 2 ? 1432 : 32843));
+        putWord(&state, kind == 2 ? 48 : 23, 1, 1); // VMIN
+        putWord(&state, kind == 2 ? 49 : 22, 1, 0); // VTIME
+    }
+    index := savedIndex(file);
+    changed := setSettings(file, state);
+    if (changed == Result<bool>.error) return changed;
+    if (index < 0) {
+        entry := savedTerminal{file, original.unwrap(), true};
+        for (i := 0; i < len(saved); i++) {
+            if (!saved[i].active) { saved[i] = entry; return changed; }
+        }
+        saved.append(entry);
+    }
+    return changed;
+}
+
+func Restore(file os.File) Result<bool> {
+    if (!file.IsOpen()) return Result<bool>.error("file is closed");
+    index := savedIndex(file);
+    if (index < 0) return Result<bool>.error("no saved terminal settings");
+    result := setSettings(file, saved[index].state);
+    if (result == Result<bool>.value) saved[index].active = false;
+    return result;
+}
+
+func readLine(file os.File) Result<string> {
+    bytes := i8[]{};
+    for (;;) {
+        read := file.Readchunk(1);
+        if (read == Result<i8[]>.error) return Result<string>.error(read.(Result<i8[]>.error));
+        chunk := read.unwrap();
+        if (len(chunk) == 0 || chunk[0] == 10) break;
+        if (platform() == 3 && chunk[0] == 13) continue;
+        bytes.append(chunk[0]);
+    }
+    return Result<string>.value(bytes -> string);
+}
+
+// Read a canonical line without echo, consuming its newline. Does not print a
+// prompt or newline. Restores the exact prior state, including an existing raw
+// mode, on success, read failure, or ordinary panic unwinding.
+func ReadPassword(file os.File) Result<string> {
+    if (!file.CanRead()) return Result<string>.error("stream is not readable");
+    original := getSettings(file);
+    if (original == Result<settings>.error) return Result<string>.error(original.(Result<settings>.error));
+    state := original.unwrap();
+    kind := platform();
+    if (kind == 3) putWord(&state, 0, 4, (word(state, 0, 4) & ~5) | 2);
+    else {
+        width := kind == 2 ? 8 : 4;
+        putWord(&state, 0, width, (word(state, 0, width) & ~192) | 256); // CR -> LF
+        putWord(&state, width * 3, width, (word(state, width * 3, width) & ~(kind == 2 ? 152 : 73)) | (kind == 2 ? 256 : 2));
+    }
+    changed := setSettings(file, state);
+    if (changed == Result<bool>.error) return Result<string>.error(changed.(Result<bool>.error));
+    restored := false;
+    defer restoreOnExit(file, original.unwrap(), &restored);
+    password := readLine(file);
+    reset := setSettings(file, original.unwrap());
+    restored = true;
+    if (reset == Result<bool>.error) return Result<string>.error("restoring password terminal: " + reset.(Result<bool>.error));
+    return password;
+}
+
+func restoreOnExit(file os.File, state settings, restored *bool) {
+    if (!*restored) setSettings(file, state).unwrap();
+}

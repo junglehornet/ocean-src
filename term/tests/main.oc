@@ -1,0 +1,65 @@
+package main;
+import "os";
+import "io";
+import "term";
+
+func require(value bool) { if (!value) panic "terminal assertion failed"; }
+func main() {
+    file := os.Stdin().unwrap();
+    mode := os.Args()[1];
+    if (mode == "invalid") {
+        invalid := os.FromDescriptor(999999, true, false);
+        require(term.IsTerminal(invalid) == Result<bool>.error);
+        require(term.GetSize(invalid) == Result<term.Size>.error);
+        require(term.MakeRaw(invalid) == Result<bool>.error);
+        require(term.ReadPassword(invalid) == Result<string>.error);
+        file.Close();
+        require(term.IsTerminal(file) == Result<bool>.error);
+        require(term.GetSize(file) == Result<term.Size>.error);
+        require(term.MakeRaw(file) == Result<bool>.error);
+        require(term.Restore(file) == Result<bool>.error);
+        require(term.ReadPassword(file) == Result<string>.error);
+        io.Println("OK").unwrap();
+        return;
+    }
+    if (mode == "pipe") {
+        require(!term.IsTerminal(file).unwrap());
+        require(term.GetSize(file) == Result<term.Size>.error);
+        require(term.MakeRaw(file) == Result<bool>.error);
+        require(term.ReadPassword(file) == Result<string>.error);
+        require(term.Restore(file) == Result<bool>.error);
+        io.Println("OK").unwrap();
+        return;
+    }
+    require(term.IsTerminal(file).unwrap());
+    if (mode == "password-error") {
+        require(term.ReadPassword(file) == Result<string>.error);
+        io.Println("OK").unwrap();
+        return;
+    }
+    if (mode == "password-eof") {
+        require(term.ReadPassword(file).unwrap() == "");
+        io.Println("OK").unwrap();
+        return;
+    }
+    require(term.Restore(file) == Result<bool>.error);
+    size := term.GetSize(file).unwrap();
+    require(size.Width == 101 && size.Height == 37);
+    term.MakeRaw(file).unwrap();
+    term.MakeRaw(file).unwrap();
+    io.Println("RAW").unwrap();
+    require(file.Readchunk(1).unwrap()[0] == 120);
+    size = term.GetSize(file).unwrap();
+    require(size.Width == 80 && size.Height == 24);
+    term.Restore(file).unwrap();
+    io.Println("RESTORED").unwrap();
+    require(file.Readchunk(1).unwrap()[0] == 10);
+    if (mode == "password-raw") term.MakeRaw(file).unwrap();
+    io.Println("PASSWORD").unwrap();
+    password := term.ReadPassword(file).unwrap();
+    require(password == "secret");
+    io.Println("READ").unwrap();
+    require(file.Readchunk(1).unwrap()[0] == 10);
+    if (mode == "password-raw") term.Restore(file).unwrap();
+    io.Println("OK").unwrap();
+}
