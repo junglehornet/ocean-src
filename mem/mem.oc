@@ -1,0 +1,23 @@
+package mem;
+
+// Copy copies bytes from src to dest, including when the regions overlap.
+// The caller must provide readable source and writable destination storage.
+// Zero bytes accesses neither pointer; negative byte counts panic.
+func Copy(src *void, dest *void, bytes int) {
+    if (bytes < 0) return panic "mem.Copy requires a nonnegative byte count";
+    if (bytes == 0 || src == dest) return;
+
+    source := src -> (buffer<u8>);
+    destination := dest -> (buffer<u8>);
+    // Address order avoids computing an end address that could overflow.
+    if ((dest -> uint) > (src -> uint)) {
+        for (i := bytes; i > 0;) {
+            i--;
+            destination[i] = source[i];
+        }
+    } else {
+        for (i := 0; i < bytes; i++) {
+            destination[i] = source[i];
+        }
+    }
+}

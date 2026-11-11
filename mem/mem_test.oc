@@ -1,0 +1,45 @@
+package mem;
+
+import "mem";
+import "testing";
+
+func TestCopyRegions(t *testing.T) {
+    // Compare every source/destination/count combination with a snapshot,
+    // including both overlap directions, equal pointers and adjacent regions.
+    for (src := 0; src < 8; src++) {
+        for (dest := 0; dest < 8; dest++) {
+            for (count := 0; count <= 8 - src && count <= 8 - dest; count++) {
+                data: u8[8] = {0, 1, 127, 128, 254, 255, 6, 7};
+                original := data;
+                mem.Copy(&data[src], &data[dest], count);
+                for (i := 0; i < 8; i++) {
+                    expected := original[i];
+                    if (i >= dest && i < dest + count) expected = original[src + i - dest];
+                    if (data[i] != expected) {
+                        t.Fatalf("src {}, dest {}, count {}, index {}: wanted {}, got {}",
+                            src, dest, count, i, expected, data[i]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+func TestCopySeparateStorage(t *testing.T) {
+    source: u8[4] = {0, 128, 255, 42};
+    dest: u8[6] = {9, 9, 9, 9, 9, 9};
+    mem.Copy(source.data, &dest[1], source.size);
+    if (dest != u8[6]{9, 0, 128, 255, 42, 9}) t.Fatal("incorrect destination bytes");
+    if (source != u8[4]{0, 128, 255, 42}) t.Fatal("source changed");
+}
+
+func TestCopyZero(t *testing.T) {
+    mem.Copy(null, null, 0);
+}
+
+func TestCopyNegative(t *testing.T) {
+    defer func() {
+        if (recover() == null) t.Error("negative byte count did not panic");
+    }();
+    mem.Copy(null, null, -1);
+}
