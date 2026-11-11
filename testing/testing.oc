@@ -1,0 +1,131 @@
+package testing;
+import "io";
+import "threads";
+import "sync";
+
+// Test callbacks execute sequentially on managed threads so Fatal stops only
+// the current test and still runs all deferred calls and cleanup callbacks.
+type cleanupCallback = func();
+struct T {
+    name string;
+    failed bool;
+    skipped bool;
+    cleanups cleanupCallback[];
+    children string[];
+}
+struct clockValue { seconds int; nanos int; }
+extern i32 timespec_get(*clockValue value, i32 base);
+extern int write(i32 fd, buffer<i8> bytes, uint count);
+lock: sync.Mutex;
+failures: int;
+testNames: string[];
+
+func now() int {
+    value: clockValue;
+    extern.timespec_get(&value, 1->i32);
+    return value.seconds * 1000000000 + value.nanos;
+}
+func quote(text string) string {
+    result := "\"";
+    hex := "0123456789abcdef";
+    for (i := 0; i < len(text); i++) {
+        c := text[i];
+        if (c == '"') result += "\\\"";
+        else if (c == '\\') result += "\\\\";
+        else if (c == '\n') result += "\\n";
+        else if (c == '\r') result += "\\r";
+        else if (c == '\t') result += "\\t";
+        else if (c >= 0 && c < 32) {
+            result += "\\u00";
+            result += hex[(c->int) / 16];
+            result += hex[(c->int) % 16];
+        } else result += c;
+    }
+    return result + "\"";
+}
+func duration(elapsed int) string {
+    if (elapsed < 0) elapsed = 0;
+    fraction := io.Sprint(elapsed % 1000000000);
+    for (len(fraction) < 9) fraction = "0" + fraction;
+    return io.Sprint(elapsed / 1000000000) + "." + fraction;
+}
+func event(action string, name string, output string, elapsed int) {
+    text := "{\"Action\":" + quote(action) + ",\"Test\":" + quote(name) +
+        ",\"Output\":" + quote(output) + ",\"Elapsed\":" + duration(elapsed) + "}\n";
+    lock.Lock();
+    defer lock.Unlock();
+    bytes := text->i8[];
+    for (offset := 0; offset < len(bytes);) {
+        n := extern.write(198->i32, (&bytes[offset])->(buffer<i8>), (len(bytes) - offset)->uint);
+        if (n <= 0) panic "test event stream closed";
+        offset += n;
+    }
+}
+func (t *T) Name() string { return t.name; }
+func (t *T) Failed() bool { return t.failed; }
+func (t *T) Skipped() bool { return t.skipped; }
+func (t *T) Fail() { t.failed = true; }
+func (t *T) Log(items ...any) { event("output", t.name, io.Sprint(items...) + "\n", 0); }
+func (t *T) Logf(format string, items ...any) { t.Log(io.Sprintf(format, items...).unwrap()); }
+func (t *T) Error(items ...any) { t.Fail(); t.Log(items...); }
+func (t *T) Errorf(format string, items ...any) { t.Fail(); t.Logf(format, items...); }
+func (t *T) FailNow() { t.Fail(); threads.Return(); }
+func (t *T) Fatal(items ...any) { t.Error(items...); threads.Return(); }
+func (t *T) Fatalf(format string, items ...any) { t.Errorf(format, items...); threads.Return(); }
+func (t *T) SkipNow() { t.skipped = true; threads.Return(); }
+func (t *T) Skip(items ...any) { t.Log(items...); t.SkipNow(); }
+func (t *T) Skipf(format string, items ...any) { t.Logf(format, items...); t.SkipNow(); }
+func (t *T) Cleanup(callback func()) { t.cleanups.append(callback); }
+func (t *T) Helper() { }
+func runCleanups(t *T) {
+    if (len(t.cleanups) == 0) return;
+    last := len(t.cleanups) - 1;
+    cleanup := t.cleanups[last];
+    t.cleanups.remove(last);
+    defer runCleanups(t);
+    cleanup();
+}
+func execute(t *T, callback func(*T)) {
+    start := now();
+    event("run", t.name, "", 0);
+    id := threads.Spawn(func() {
+        defer func() {
+            message := recover();
+            if (message != null) t.Error("panic: ", message);
+        }();
+        defer runCleanups(t);
+        callback(t);
+    });
+    threads.Await(id);
+    action := t.failed ? "fail" : (t.skipped ? "skip" : "pass");
+    event(action, t.name, "", now() - start);
+}
+func (t *T) Run(name string, callback func(*T)) bool {
+    if (name == "") name = "#00";
+    base := name;
+    index := 0;
+    for (i := 0; i < len(t.children); i++) {
+        if (t.children[i] == name) { index++; name = base + "#" + io.Sprint(index); i = -1; }
+    }
+    t.children.append(name);
+    child: T;
+    child.name = t.name + "/" + name;
+    execute(&child, callback);
+    if (child.failed) t.Fail();
+    return !child.failed;
+}
+// Runner entry points are used by ocean test's generated main package.
+func Start() { failures = 0; testNames = {}; event("start", "", "", 0); }
+func RunTest(name string, callback func(*T)) {
+    base := name;
+    index := 0;
+    for (i := 0; i < len(testNames); i++) {
+        if (testNames[i] == name) { index++; name = base + "#" + io.Sprint(index); i = -1; }
+    }
+    testNames.append(name);
+    t: T;
+    t.name = name;
+    execute(&t, callback);
+    if (t.failed) failures++;
+}
+func Finish() int { event("complete", "", "", 0); return failures > 0 ? 1 : 0; }
