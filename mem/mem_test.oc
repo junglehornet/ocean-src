@@ -1,4 +1,4 @@
-package mem;
+package mem_test;
 
 import "mem";
 import "testing";
