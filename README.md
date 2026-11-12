@@ -135,6 +135,29 @@ returns `Result<string>` and reports argument-count mismatches as errors.
 `io.Sprint` remains a plain string conversion. Unix writes retry interruptions;
 other native output failures return errors.
 
+## Built-in Optional
+
+`Optional<T>` is provided by the compiler and requires no import or
+standard-library source file:
+
+```ocean
+enum Optional<T> { none, value(T) }
+```
+
+Construct a present value with `Optional<int>.value(42)` and an absent value
+with `Optional<int>.none`. The former `Some` and `None` variant names are no
+longer supported. Uninitialized optionals and `zero(Optional<T>)` are `none`.
+Assigning `null` selects `none`, which compares equal to `null`.
+`Optional<*int>.value(null)` is still present.
+
+`hasValue() bool` returns true for `value` and false for `none`.
+`unwrap() T` returns the present payload and panics on `none`, attributed to
+the caller. Payloads follow ordinary value-copy and ownership rules. Extraction
+(`optional.(Optional.value)`), matching (`Optional.value(v)` /
+`Optional.none`), and enum comparisons also work. The lowercase variants and
+methods are public built-ins regardless of package capitalization rules.
+A user declaration can shadow `Optional`.
+
 ## Built-in Result and number parsing
 
 `Result<T>` is available without imports or standard-library files. It is the
@@ -149,10 +172,15 @@ Construct values with explicit type arguments, for example
 variant comparisons, extraction, and `match` to inspect either case. Its
 lowercase variants and methods are public language built-ins, independent of
 package capitalization rules; ordinary package members retain those rules.
+`result.error()` is an instance accessor; `Result<T>.error(message)` still
+constructs an error variant. The built-in accessor is an exception to the ban
+on methods sharing enum variant names.
 A user-declared Result may shadow the built-in name and remains a distinct type.
 
 | Method | value case | error case |
 | --- | --- | --- |
+| `hasError() bool` | Returns false | Returns true |
+| `error() string` | Panics | Returns the stored error string |
 | `unwrap() T` | Returns the payload | Returns a panic containing the stored error string, attributed to the caller |
 | `unwrapOrElse(fallback T) T` | Returns the payload | Returns the provided fallback value |
 | `unwrapOrZero() T` | Returns the payload | Returns `zero(T)` |
