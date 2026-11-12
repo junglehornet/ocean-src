@@ -20,6 +20,12 @@ the stable Win32 API instead of version-dependent raw syscall numbers; link
 `kernel32` when manually linking emitted LLVM (`-lkernel32`). The compiler adds
 this library to native Windows executable links.
 
+`io.Print`, `io.Println`, `io.Sprint`, and the formatted-output functions render
+mutable `i8[]` values as comma-separated decimal bytes, for example `[1, 5, 3]`.
+Strings still print as text; convert with `bytes -> string` for textual output.
+Use the matching compiler, which distinguishes concrete `string` and `i8[]`
+type-switch cases.
+
 Float formatting is implemented in Ocean, with exact IEEE binary64 conversion
 and round-to-nearest, ties-to-even decimal rounding. It handles subnormals,
 signed zero, infinities and NaNs independently of the C locale. Default printed
