@@ -1,9 +1,28 @@
 package tui;
+
 import "testing";
 import "term";
+
+struct frameTest {
+    name, input string;
+    size term.Size;
+    text string;
+    rows int;
+}
+
 func TestFrameClippingAndStyles(t *testing.T) {
-    text, rows := frame("\x1b[31mab界cd\x1b[0m\nnext\nignored",term.Size{Width:5,Height:2});
-    if (text != "\x1b[31mab界\x1b[0m\r\nnext\x1b[0m" || rows != 1) t.Fatal("frame changed clipping, UTF-8, styles, or height limits");
-    text, rows = frame("a\tb\x1b[2J!",term.Size{Width:12,Height:1});
-    if (text != "a       b!\x1b[0m" || rows != 0) t.Fatal("frame changed tabs or control sanitization");
+    t.Parallel();
+    tests := frameTest[]{
+        {"UTF-8 clipping styles and height", "\x1b[31mab界cd\x1b[0m\nnext\nignored", term.Size{Width:5,Height:2}, "\x1b[31mab界\x1b[0m\r\nnext\x1b[0m", 1},
+        {"tabs and control sanitization", "a\tb\x1b[2J!", term.Size{Width:12,Height:1}, "a       b!\x1b[0m", 0},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            text, rows := frame(test.input, test.size);
+            if (text != test.text || rows != test.rows) {
+                t.Errorf("frame: expected text {} and rows {}, got text {} and rows {}", test.text, test.rows, text, rows);
+            }
+        });
+    }
 }

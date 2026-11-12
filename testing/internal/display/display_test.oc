@@ -10,7 +10,7 @@ func includes(text string, needle string) bool {
     }
     return false;
 }
-func TestLiveTransitions(t *testing.T) {
+func checkLiveTransitions(t *testing.T) {
     model := display{packageName: "example/package", width: 100, height: 24, started: now(), follow: true, showSkipped: true};
     // Fragmented protocol reads must not expose half an event to the model.
     model.Update(chunkMsg{"run\t0\t546573744f"});
@@ -27,7 +27,7 @@ func TestLiveTransitions(t *testing.T) {
     model.Update(clearMsg{});
     if (model.View() != "") t.Fatal("final live frame must be cleared before the report");
 }
-func TestResizeAndColor(t *testing.T) {
+func checkResizeAndColor(t *testing.T) {
     model := display{packageName: "example/package", width: 80, height: 24, started: now(), follow: true};
     model.accept("run\t0\t5465737454797065\t");
     model.Update(tui.WindowSizeMsg{40, 8});
@@ -40,7 +40,7 @@ func TestResizeAndColor(t *testing.T) {
     model.Update(tui.KeyMsg{Key: "ctrl+c"});
     if (!model.cancelled || model.View() != "") t.Fatal("interrupt not handled");
 }
-func TestFollowAndScrolling(t *testing.T) {
+func checkFollowAndScrolling(t *testing.T) {
     model := display{packageName: "example/package", width: 100, height: 8, started: now(), follow: true};
     // Populate directly to keep this test independent of integer hex formatting.
     model.rows = {};
@@ -64,7 +64,7 @@ func position(text string, needle string) int {
     }
     return -1;
 }
-func TestInterleavedSubtestTrees(t *testing.T) {
+func checkInterleavedSubtestTrees(t *testing.T) {
     model := display{packageName: "example/package", width: 120, height: 40, started: now(), follow: true, showSkipped: true};
     model.accept("run\t0\t546573744f6e65\t");
     model.accept("run\t0\t5465737454776f\t");
@@ -94,7 +94,7 @@ func TestInterleavedSubtestTrees(t *testing.T) {
         t.Fatal("status updates no longer address the correct tests");
 }
 
-func TestPackageScopedNames(t *testing.T) {
+func checkPackageScopedNames(t *testing.T) {
     model := display{width: 140, height: 40, started: now(), showSkipped: true};
     model.accept("start\t0\t\t\t6578616d706c652e746573742f70726f6a6563742f61");
     model.accept("run\t0\t5465737453616d65\t\t6578616d706c652e746573742f70726f6a6563742f61");
@@ -116,7 +116,7 @@ func TestPackageScopedNames(t *testing.T) {
     }
 }
 
-func TestPauseResumeAndPackageFold(t *testing.T) {
+func checkPauseResumeAndPackageFold(t *testing.T) {
     model := display{width: 140, height: 40, started: now(), showSkipped: true};
     model.accept("start\t0\t\t\t6578616d706c652e746573742f67726f7570");
     model.accept("run\t0\t54657374506172616c6c656c\t\t6578616d706c652e746573742f67726f7570");
@@ -130,4 +130,28 @@ func TestPauseResumeAndPackageFold(t *testing.T) {
     model.accept("pass\t0\t\t\t6578616d706c652e746573742f67726f7570");
     if (!includes(model.View(), "example.test/group")) t.Fatal("missing example.test/group display");
     if (includes(model.View(), "TestParallel")) t.Fatal("completed package did not fold");
+}
+
+struct displayTest {
+    name string;
+    run func(*testing.T);
+}
+
+func TestDisplayScenarios(t *testing.T) {
+    t.Parallel();
+    // Each case owns its model; events within a scenario stay in order.
+    tests := displayTest[]{
+        {"LiveTransitions", checkLiveTransitions},
+        {"ResizeAndColor", checkResizeAndColor},
+        {"FollowAndScrolling", checkFollowAndScrolling},
+        {"InterleavedSubtestTrees", checkInterleavedSubtestTrees},
+        {"PackageScopedNames", checkPackageScopedNames},
+        {"PauseResumeAndPackageFold", checkPauseResumeAndPackageFold},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            test.run(t);
+        });
+    }
 }

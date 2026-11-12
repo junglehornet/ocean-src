@@ -1,0 +1,396 @@
+package math_test;
+
+import "math";
+import "testing";
+
+func near(t *testing.T, name string, got float, want float, tolerance float) {
+    if (math.IsNaN(got) || math.Abs(got - want) > tolerance * math.Max(1.0, math.Abs(want))) {
+        t.Fatalf("{}: got {}, want {}", name, got, want);
+    }
+}
+// Each case owns its execution; range bindings are captured separately by Ocean.
+struct mathCase {
+    name string;
+    run func(*testing.T);
+}
+
+func TestPowers(t *testing.T) {
+    t.Parallel();
+    z := math.Copysign(0.0, -1.0);
+    tests := mathCase[]{
+        {"integer", func(t *testing.T) {
+            near(t, "integer", math.Pow(2.0, 10.0), 1024.0, 0.0);
+        }},
+        {"fraction", func(t *testing.T) {
+            near(t, "fraction", math.Pow(9.0, 0.5), 3.0, 2e-15);
+        }},
+        {"fractional exponent", func(t *testing.T) {
+            near(t, "fractional exponent", math.Pow(2.0, 3.25), 9.513656920021768, 2e-15);
+        }},
+        {"negative exponent", func(t *testing.T) {
+            near(t, "negative exponent", math.Pow(2.0, -3.0), 0.125, 0.0);
+        }},
+        {"negative odd", func(t *testing.T) {
+            near(t, "negative odd", math.Pow(-2.0, 3.0), -8.0, 0.0);
+        }},
+        {"negative even", func(t *testing.T) {
+            near(t, "negative even", math.Pow(-2.0, 4.0), 16.0, 0.0);
+        }},
+        {"minus one huge", func(t *testing.T) {
+            near(t, "minus one huge", math.Pow(-1.0, 1e30), 1.0, 0.0);
+        }},
+        {"near one", func(t *testing.T) {
+            near(t, "near one", math.Pow(1.0000000000000002, 4503599627370496.0), 2.718281828459045, 3e-15);
+        }},
+        {"negative fractional power must be NaN", func(t *testing.T) {
+            if (!math.IsNaN(math.Pow(-2.0, 0.5))) t.Fatal("negative fractional power must be NaN");
+        }},
+        {"zero negative power", func(t *testing.T) {
+            if (!math.IsInf(math.Pow(0.0, -2.0), 1)) t.Fatal("zero negative power");
+        }},
+        {"power overflow", func(t *testing.T) {
+            if (!math.IsInf(math.Pow(2.0, 1024.0), 1)) t.Fatal("power overflow");
+        }},
+        {"power underflow", func(t *testing.T) {
+            if (math.Pow(2.0, -1075.0) != 0) t.Fatal("power underflow");
+        }},
+        {"NaN to zero", func(t *testing.T) {
+            near(t, "NaN to zero", math.Pow(math.NaN(), 0.0), 1.0, 0.0);
+        }},
+        {"one to NaN", func(t *testing.T) {
+            near(t, "one to NaN", math.Pow(1.0, math.NaN()), 1.0, 0.0);
+        }},
+        {"infinite exponent", func(t *testing.T) {
+            near(t, "infinite exponent", math.Pow(0.5, math.Inf(1)), 0.0, 0.0);
+        }},
+        {"negative infinite exponent", func(t *testing.T) {
+            if (!math.IsInf(math.Pow(0.5, math.Inf(-1)), 1)) t.Fatal("negative infinite exponent");
+        }},
+        {"negative zero odd power", func(t *testing.T) {
+            if (!math.Signbit(math.Pow(z, 3.0))) t.Fatal("negative zero odd power");
+        }},
+        {"negative zero reciprocal", func(t *testing.T) {
+            if (!math.IsInf(math.Pow(z, -3.0), -1)) t.Fatal("negative zero reciprocal");
+        }},
+        {"negative infinity odd power", func(t *testing.T) {
+            if (!math.IsInf(math.Pow(math.Inf(-1), 3.0), -1)) t.Fatal("negative infinity odd power");
+        }},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            test.run(t);
+        });
+    }
+}
+
+func TestExpAndLog(t *testing.T) {
+    t.Parallel();
+    tiny := math.Float64frombits(1);
+    tests := mathCase[]{
+        {"exp zero", func(t *testing.T) {
+            near(t, "exp zero", math.Exp(0.0), 1.0, 0.0);
+        }},
+        {"exp one", func(t *testing.T) {
+            near(t, "exp one", math.Exp(1.0), math.E, 2e-15);
+        }},
+        {"exp negative", func(t *testing.T) {
+            near(t, "exp negative", math.Exp(-10.0), 0.00004539992976248485, 1e-18);
+        }},
+        {"exp 700", func(t *testing.T) {
+            near(t, "exp 700", math.Exp(700.0), 1.0142320547350045e304, 3e-15);
+        }},
+        {"log one", func(t *testing.T) {
+            near(t, "log one", math.Log(1.0), 0.0, 0.0);
+        }},
+        {"log e", func(t *testing.T) {
+            near(t, "log e", math.Log(math.E), 1.0, 2e-15);
+        }},
+        {"log2", func(t *testing.T) {
+            near(t, "log2", math.Log2(1024.0), 10.0, 2e-15);
+        }},
+        {"log10", func(t *testing.T) {
+            near(t, "log10", math.Log10(1000.0), 3.0, 2e-15);
+        }},
+        {"exp2 smallest subnormal", func(t *testing.T) {
+            if (math.Exp2(-1074.0) != tiny) t.Fatal("exp2 smallest subnormal");
+        }},
+        {"log subnormal", func(t *testing.T) {
+            near(t, "log subnormal", math.Log(tiny), -744.4400719213812, 2e-15);
+        }},
+        {"exp range", func(t *testing.T) {
+            if (!math.IsInf(math.Exp(710.0), 1) || math.Exp(-746.0) != 0) t.Fatal("exp range");
+        }},
+        {"log domain", func(t *testing.T) {
+            if (!math.IsInf(math.Log(0.0), -1) || !math.IsNaN(math.Log(-1.0))) t.Fatal("log domain");
+        }},
+        {"infinite inputs", func(t *testing.T) {
+            if (!math.IsInf(math.Log(math.Inf(1)), 1) || math.Exp(math.Inf(-1)) != 0) t.Fatal("infinite inputs");
+        }},
+        {"round trips", func(t *testing.T) {
+            for (i := -100; i <= 100; i++) {
+            x := i / 10.0;
+            near(t, "log(exp(x))", math.Log(math.Exp(x)), x, 3e-15);
+            }
+        }},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            test.run(t);
+        });
+    }
+}
+
+func TestTrigonometry(t *testing.T) {
+    t.Parallel();
+    z := math.Copysign(0.0, -1.0);
+    tests := mathCase[]{
+        {"sin", func(t *testing.T) {
+            near(t, "sin", math.Sin(math.Pi / 6.0), 0.5, 2e-15);
+        }},
+        {"cos", func(t *testing.T) {
+            near(t, "cos", math.Cos(math.Pi / 3.0), 0.5, 2e-15);
+        }},
+        {"tan", func(t *testing.T) {
+            near(t, "tan", math.Tan(math.Pi / 4.0), 1.0, 2e-15);
+        }},
+        {"asin", func(t *testing.T) {
+            near(t, "asin", math.Asin(0.5), math.Pi / 6.0, 2e-15);
+        }},
+        {"acos", func(t *testing.T) {
+            near(t, "acos", math.Acos(0.5), math.Pi / 3.0, 2e-15);
+        }},
+        {"atan", func(t *testing.T) {
+            near(t, "atan", math.Atan(1.0), math.Pi / 4.0, 2e-15);
+        }},
+        {"atan infinity", func(t *testing.T) {
+            near(t, "atan infinity", math.Atan(math.Inf(-1)), -math.Pi / 2.0, 2e-15);
+        }},
+        {"quadrant II", func(t *testing.T) {
+            near(t, "quadrant II", math.Atan2(1.0, -1.0), 3.0 * math.Pi / 4.0, 2e-15);
+        }},
+        {"quadrant III", func(t *testing.T) {
+            near(t, "quadrant III", math.Atan2(-1.0, -1.0), -3.0 * math.Pi / 4.0, 2e-15);
+        }},
+        {"infinite quadrant", func(t *testing.T) {
+            near(t, "infinite quadrant", math.Atan2(math.Inf(1), math.Inf(-1)), 3.0 * math.Pi / 4.0, 2e-15);
+        }},
+        {"trig domains", func(t *testing.T) {
+            if (!math.IsNaN(math.Sin(math.Inf(1))) || !math.IsNaN(math.Asin(2.0)) || !math.IsNaN(math.Acos(-2.0))) t.Fatal("trig domains");
+        }},
+        {"trig signed zero", func(t *testing.T) {
+            if (!math.Signbit(math.Sin(z)) || !math.Signbit(math.Atan(z)) || !math.Signbit(math.Asin(z))) t.Fatal("trig signed zero");
+        }},
+        {"atan2 signed zero", func(t *testing.T) {
+            near(t, "atan2 signed zero", math.Atan2(z, -1.0), -math.Pi, 0.0);
+        }},
+        {"round trips", func(t *testing.T) {
+            for (i := -100; i <= 100; i++) {
+            x := i / 10.0;
+            s := math.Sin(x); c := math.Cos(x);
+            near(t, "unit circle", s * s + c * c, 1.0, 3e-15);
+            near(t, "atan round trip", math.Tan(math.Atan(x)), x, 5e-15);
+            }
+        }},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            test.run(t);
+        });
+    }
+}
+
+func TestRootsAndHelpers(t *testing.T) {
+    t.Parallel();
+    tiny := math.Float64frombits(1);
+    r := math.Sqrt(tiny);
+    z := math.Copysign(0.0, -1.0);
+    tests := mathCase[]{
+        {"sqrt", func(t *testing.T) {
+            near(t, "sqrt", math.Sqrt(2.0), math.Sqrt2, 2e-15);
+        }},
+        {"hypot", func(t *testing.T) {
+            near(t, "hypot", math.Hypot(3.0, 4.0), 5.0, 0.0);
+        }},
+        {"hypot large", func(t *testing.T) {
+            near(t, "hypot large", math.Hypot(3e200, 4e200), 5e200, 2e-15);
+        }},
+        {"sqrt domain", func(t *testing.T) {
+            if (!math.IsNaN(math.Sqrt(-1.0))) t.Fatal("sqrt domain");
+        }},
+        {"sqrt subnormal", func(t *testing.T) {
+            if (r * r != tiny) t.Fatal("sqrt subnormal");
+        }},
+        {"sqrt negative zero", func(t *testing.T) {
+            if (!math.Signbit(math.Sqrt(z))) t.Fatal("sqrt negative zero");
+        }},
+        {"hypot infinity precedes NaN", func(t *testing.T) {
+            if (!math.IsInf(math.Hypot(math.NaN(), math.Inf(1)), 1)) t.Fatal("hypot infinity precedes NaN");
+        }},
+        {"floor", func(t *testing.T) {
+            near(t, "floor", math.Floor(-1.2), -2.0, 0.0);
+        }},
+        {"ceil", func(t *testing.T) {
+            near(t, "ceil", math.Ceil(-1.2), -1.0, 0.0);
+        }},
+        {"trunc", func(t *testing.T) {
+            near(t, "trunc", math.Trunc(-1.8), -1.0, 0.0);
+        }},
+        {"round negative tie", func(t *testing.T) {
+            near(t, "round negative tie", math.Round(-1.5), -2.0, 0.0);
+        }},
+        {"round positive tie", func(t *testing.T) {
+            near(t, "round positive tie", math.Round(1.5), 2.0, 0.0);
+        }},
+        {"mod", func(t *testing.T) {
+            near(t, "mod", math.Mod(-5.5, 2.0), -1.5, 0.0);
+        }},
+        {"mod subnormal", func(t *testing.T) {
+            if (math.Mod(tiny * 3.0, tiny * 2.0) != tiny) t.Fatal("mod subnormal");
+        }},
+        {"mod zero divisor", func(t *testing.T) {
+            if (!math.IsNaN(math.Mod(1.0, 0.0))) t.Fatal("mod zero divisor");
+        }},
+        {"min/max zero signs", func(t *testing.T) {
+            if (!math.Signbit(math.Min(0.0, z)) || math.Signbit(math.Max(z, 0.0))) t.Fatal("min/max zero signs");
+        }},
+        {"min/max NaN", func(t *testing.T) {
+            if (!math.IsNaN(math.Min(math.NaN(), 1.0)) || !math.IsNaN(math.Max(1.0, math.NaN()))) t.Fatal("min/max NaN");
+        }},
+        {"bit round trip", func(t *testing.T) {
+            if (math.Float64bits(math.Float64frombits(123456789)) != 123456789) t.Fatal("bit round trip");
+        }},
+        {"classification", func(t *testing.T) {
+            if (!math.IsNaN(math.NaN()) || !math.IsInf(math.Inf(-1), 0) || math.IsInf(1.0, 0)) t.Fatal("classification");
+        }},
+        {"absolute value", func(t *testing.T) {
+            if (math.Abs(-2.0) != 2 || math.Signbit(math.Abs(z))) t.Fatal("absolute value");
+        }},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            test.run(t);
+        });
+    }
+}
+
+func TestReferenceValues(t *testing.T) {
+    t.Parallel();
+    tests := mathCase[]{
+        {"Sin(-100.0)", func(t *testing.T) {
+            near(t, "Sin(-100.0)", math.Sin(-100.0), 0.5063656411097588, 2e-14);
+        }},
+        {"Cos(-100.0)", func(t *testing.T) {
+            near(t, "Cos(-100.0)", math.Cos(-100.0), 0.8623188722876839, 2e-14);
+        }},
+        {"Atan(-100.0)", func(t *testing.T) {
+            near(t, "Atan(-100.0)", math.Atan(-100.0), -1.5607966601082315, 2e-14);
+        }},
+        {"Sin(-6.0)", func(t *testing.T) {
+            near(t, "Sin(-6.0)", math.Sin(-6.0), 0.27941549819892586, 2e-14);
+        }},
+        {"Cos(-6.0)", func(t *testing.T) {
+            near(t, "Cos(-6.0)", math.Cos(-6.0), 0.960170286650366, 2e-14);
+        }},
+        {"Atan(-6.0)", func(t *testing.T) {
+            near(t, "Atan(-6.0)", math.Atan(-6.0), -1.4056476493802699, 2e-14);
+        }},
+        {"Sin(-3.0)", func(t *testing.T) {
+            near(t, "Sin(-3.0)", math.Sin(-3.0), -0.1411200080598672, 2e-14);
+        }},
+        {"Cos(-3.0)", func(t *testing.T) {
+            near(t, "Cos(-3.0)", math.Cos(-3.0), -0.9899924966004454, 2e-14);
+        }},
+        {"Atan(-3.0)", func(t *testing.T) {
+            near(t, "Atan(-3.0)", math.Atan(-3.0), -1.2490457723982544, 2e-14);
+        }},
+        {"Sin(-0.4)", func(t *testing.T) {
+            near(t, "Sin(-0.4)", math.Sin(-0.4), -0.3894183423086505, 2e-14);
+        }},
+        {"Cos(-0.4)", func(t *testing.T) {
+            near(t, "Cos(-0.4)", math.Cos(-0.4), 0.9210609940028851, 2e-14);
+        }},
+        {"Atan(-0.4)", func(t *testing.T) {
+            near(t, "Atan(-0.4)", math.Atan(-0.4), -0.3805063771123649, 2e-14);
+        }},
+        {"Sin(0.1)", func(t *testing.T) {
+            near(t, "Sin(0.1)", math.Sin(0.1), 0.09983341664682815, 2e-14);
+        }},
+        {"Cos(0.1)", func(t *testing.T) {
+            near(t, "Cos(0.1)", math.Cos(0.1), 0.9950041652780258, 2e-14);
+        }},
+        {"Atan(0.1)", func(t *testing.T) {
+            near(t, "Atan(0.1)", math.Atan(0.1), 0.09966865249116204, 2e-14);
+        }},
+        {"Sin(0.8)", func(t *testing.T) {
+            near(t, "Sin(0.8)", math.Sin(0.8), 0.7173560908995228, 2e-14);
+        }},
+        {"Cos(0.8)", func(t *testing.T) {
+            near(t, "Cos(0.8)", math.Cos(0.8), 0.6967067093471654, 2e-14);
+        }},
+        {"Atan(0.8)", func(t *testing.T) {
+            near(t, "Atan(0.8)", math.Atan(0.8), 0.6747409422235527, 2e-14);
+        }},
+        {"Sin(1.5)", func(t *testing.T) {
+            near(t, "Sin(1.5)", math.Sin(1.5), 0.9974949866040544, 2e-14);
+        }},
+        {"Cos(1.5)", func(t *testing.T) {
+            near(t, "Cos(1.5)", math.Cos(1.5), 0.0707372016677029, 2e-14);
+        }},
+        {"Atan(1.5)", func(t *testing.T) {
+            near(t, "Atan(1.5)", math.Atan(1.5), 0.982793723247329, 2e-14);
+        }},
+        {"Sin(4.0)", func(t *testing.T) {
+            near(t, "Sin(4.0)", math.Sin(4.0), -0.7568024953079282, 2e-14);
+        }},
+        {"Cos(4.0)", func(t *testing.T) {
+            near(t, "Cos(4.0)", math.Cos(4.0), -0.6536436208636119, 2e-14);
+        }},
+        {"Atan(4.0)", func(t *testing.T) {
+            near(t, "Atan(4.0)", math.Atan(4.0), 1.3258176636680326, 2e-14);
+        }},
+        {"Sin(20.0)", func(t *testing.T) {
+            near(t, "Sin(20.0)", math.Sin(20.0), 0.9129452507276277, 2e-14);
+        }},
+        {"Cos(20.0)", func(t *testing.T) {
+            near(t, "Cos(20.0)", math.Cos(20.0), 0.40808206181339196, 2e-14);
+        }},
+        {"Atan(20.0)", func(t *testing.T) {
+            near(t, "Atan(20.0)", math.Atan(20.0), 1.5208379310729538, 2e-14);
+        }},
+        {"Sin(100.0)", func(t *testing.T) {
+            near(t, "Sin(100.0)", math.Sin(100.0), -0.5063656411097588, 2e-14);
+        }},
+        {"Cos(100.0)", func(t *testing.T) {
+            near(t, "Cos(100.0)", math.Cos(100.0), 0.8623188722876839, 2e-14);
+        }},
+        {"Atan(100.0)", func(t *testing.T) {
+            near(t, "Atan(100.0)", math.Atan(100.0), 1.5607966601082315, 2e-14);
+        }},
+        {"Pow reference", func(t *testing.T) {
+            near(t, "Pow reference", math.Pow(0.1, 0.3) / 0.5011872336272724, 1.0, 2e-12);
+        }},
+        {"Pow reference 32", func(t *testing.T) {
+            near(t, "Pow reference", math.Pow(1e-200, 0.5) / 1e-100, 1.0, 2e-12);
+        }},
+        {"Pow reference 33", func(t *testing.T) {
+            near(t, "Pow reference", math.Pow(1e+200, 0.5) / 1e+100, 1.0, 2e-12);
+        }},
+        {"Pow reference 34", func(t *testing.T) {
+            near(t, "Pow reference", math.Pow(0.9999, 1234.5) / 0.8838603774221929, 1.0, 2e-12);
+        }},
+        {"Pow reference 35", func(t *testing.T) {
+            near(t, "Pow reference", math.Pow(1.0001, -1234.5) / 0.8838712887459568, 1.0, 2e-12);
+        }},
+    };
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            test.run(t);
+        });
+    }
+}
+

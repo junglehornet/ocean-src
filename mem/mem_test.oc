@@ -2,30 +2,41 @@ package mem_test;
 
 import "mem";
 import "testing";
+import "io";
+
+struct copyTest { name string; src, dest, count int; }
 
 func TestCopyRegions(t *testing.T) {
-    // Compare every source/destination/count combination with a snapshot,
-    // including both overlap directions, equal pointers and adjacent regions.
+    t.Parallel();
+    // Generate a table covering all overlaps, equal pointers and adjacency.
+    tests := make(copyTest[]);
     for (src := 0; src < 8; src++) {
         for (dest := 0; dest < 8; dest++) {
             for (count := 0; count <= 8 - src && count <= 8 - dest; count++) {
-                data: u8[8] = {0, 1, 127, 128, 254, 255, 6, 7};
-                original := data;
-                mem.Copy(&data[src], &data[dest], count);
-                for (i := 0; i < 8; i++) {
-                    expected := original[i];
-                    if (i >= dest && i < dest + count) expected = original[src + i - dest];
-                    if (data[i] != expected) {
-                        t.Fatalf("src {}, dest {}, count {}, index {}: wanted {}, got {}",
-                            src, dest, count, i, expected, data[i]);
-                    }
-                }
+                name := io.Sprintf("src {} dest {} count {}", src, dest, count).unwrap();
+                tests.append(copyTest{name, src, dest, count});
             }
         }
+    }
+    for (_, test := range tests) {
+        t.Run(test.name, func(t *testing.T) {
+            t.Parallel();
+            data: u8[8] = {0, 1, 127, 128, 254, 255, 6, 7};
+            original := data;
+            mem.Copy(&data[test.src], &data[test.dest], test.count);
+            for (i := 0; i < 8; i++) {
+                expected := original[i];
+                if (i >= test.dest && i < test.dest + test.count) expected = original[test.src + i - test.dest];
+                if (data[i] != expected) {
+                    t.Fatalf("index {}: wanted {}, got {}", i, expected, data[i]);
+                }
+            }
+        });
     }
 }
 
 func TestCopySeparateStorage(t *testing.T) {
+    t.Parallel();
     source: u8[4] = {0, 128, 255, 42};
     dest: u8[6] = {9, 9, 9, 9, 9, 9};
     mem.Copy(source.data, &dest[1], source.size);
@@ -34,10 +45,12 @@ func TestCopySeparateStorage(t *testing.T) {
 }
 
 func TestCopyZero(t *testing.T) {
+    t.Parallel();
     mem.Copy(null, null, 0);
 }
 
 func TestCopyNegative(t *testing.T) {
+    t.Parallel();
     defer func() {
         if (recover() == null) t.Error("negative byte count did not panic");
     }();

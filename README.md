@@ -263,3 +263,9 @@ for lifecycle, I/O, and cancellation rules.
 [`time`](time/README.md) provides `Sleep(nanoseconds int)` and nanosecond-based
 units: `time.Sleep(10 * time.Millisecond)`. Unit values are ordinary exported
 integers, treated as constants by convention until Ocean gains constant declarations.
+
+[`math`](math/README.md) provides floating-point trigonometry, powers,
+logarithms, roots, rounding, and IEEE helpers without C extern functions.
+`math.Pow(x float, y float) float` accepts fractional exponents. Native assembly
+accelerates fractional powers on x86-64 and square roots on supported native
+architectures; portable Ocean routines cover the remaining paths.
