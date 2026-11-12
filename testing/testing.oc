@@ -2,11 +2,19 @@ package testing;
 import "io";
 import "threads";
 import "sync";
+import "os";
+import "time";
 
-// Test callbacks execute sequentially on managed threads so Fatal stops only
-// the current test and still runs all deferred calls and cleanup callbacks.
+// Top-level tests share a bounded pool. Async subtests use extra native
+// threads; a parent joins all of them before cleanup and final reporting.
 type cleanupCallback = func();
+struct childTask { id int; test *T; }
+struct testJob { name string; callback func(*T); }
 struct T {
+    gate sync.Mutex;
+    parent *T;
+    pending childTask[];
+    cleaning bool;
     name string;
     failed bool;
     skipped bool;
@@ -19,6 +27,10 @@ extern int write(i32 fd, buffer<i8> bytes, uint count);
 lock: sync.Mutex;
 failures: int;
 testNames: string[];
+poolGate: sync.Mutex;
+jobs: testJob[];
+nextJob: int;
+workerCount: int;
 
 func now() int {
     value: clockValue;
@@ -62,9 +74,13 @@ func event(action string, name string, output string, elapsed int) {
     }
 }
 func (t *T) Name() string { return t.name; }
-func (t *T) Failed() bool { return t.failed; }
-func (t *T) Skipped() bool { return t.skipped; }
-func (t *T) Fail() { t.failed = true; }
+func (t *T) Failed() bool {
+    t.gate.Lock(); defer t.gate.Unlock(); return t.failed;
+}
+func (t *T) Skipped() bool {
+    t.gate.Lock(); defer t.gate.Unlock(); return t.skipped;
+}
+func (t *T) Fail() { t.gate.Lock(); t.failed = true; t.gate.Unlock(); }
 func (t *T) Log(items ...any) { event("output", t.name, io.Sprint(items...) + "\n", 0); }
 func (t *T) Logf(format string, items ...any) { t.Log(io.Sprintf(format, items...).unwrap()); }
 func (t *T) Error(items ...any) { t.Fail(); t.Log(items...); }
@@ -72,35 +88,76 @@ func (t *T) Errorf(format string, items ...any) { t.Fail(); t.Logf(format, items
 func (t *T) FailNow() { t.Fail(); threads.Return(); }
 func (t *T) Fatal(items ...any) { t.Error(items...); threads.Return(); }
 func (t *T) Fatalf(format string, items ...any) { t.Errorf(format, items...); threads.Return(); }
-func (t *T) SkipNow() { t.skipped = true; threads.Return(); }
+func (t *T) SkipNow() {
+    t.gate.Lock(); t.skipped = true; t.gate.Unlock(); threads.Return();
+}
 func (t *T) Skip(items ...any) { t.Log(items...); t.SkipNow(); }
 func (t *T) Skipf(format string, items ...any) { t.Logf(format, items...); t.SkipNow(); }
-func (t *T) Cleanup(callback func()) { t.cleanups.append(callback); }
+func (t *T) Cleanup(callback func()) {
+    t.gate.Lock(); t.cleanups.append(callback); t.gate.Unlock();
+}
 func (t *T) Helper() { }
 func runCleanups(t *T) {
-    if (len(t.cleanups) == 0) return;
+    t.gate.Lock();
+    if (len(t.cleanups) == 0) { t.gate.Unlock(); return; }
     last := len(t.cleanups) - 1;
     cleanup := t.cleanups[last];
     t.cleanups.remove(last);
+    t.gate.Unlock();
     defer runCleanups(t);
     cleanup();
+}
+func clean(t *T) {
+    t.gate.Lock(); t.cleaning = true; t.gate.Unlock();
+    defer func() {
+        message := recover();
+        if (message != null) t.Error("panic: ", message);
+    }();
+    runCleanups(t);
+}
+func releaseChild(child childTask) {
+    threads.Await(child.id);
+    free(child.test);
+}
+func finish(t *T) {
+    // Join children before parent cleanups, even when the body called Fatal.
+    defer clean(t);
+    for (;;) {
+        t.gate.Lock();
+        if (len(t.pending) == 0) { t.gate.Unlock(); return; }
+        last := len(t.pending) - 1;
+        child := t.pending[last];
+        t.pending.remove(last);
+        t.gate.Unlock();
+        releaseChild(child);
+    }
+}
+func report(t *T, start int) {
+    failed := t.Failed();
+    if (failed) {
+        if (t.parent != null) t.parent.Fail();
+        else { poolGate.Lock(); failures++; poolGate.Unlock(); }
+    }
+    event(failed ? "fail" : (t.Skipped() ? "skip" : "pass"), t.name, "", now() - start);
 }
 func execute(t *T, callback func(*T)) {
     start := now();
     event("run", t.name, "", 0);
-    id := threads.Spawn(func() {
-        defer func() {
-            message := recover();
-            if (message != null) t.Error("panic: ", message);
-        }();
-        defer runCleanups(t);
-        callback(t);
-    });
-    threads.Await(id);
-    action := t.failed ? "fail" : (t.skipped ? "skip" : "pass");
-    event(action, t.name, "", now() - start);
+    // Separate deferred frames preserve reporting if a cleanup itself stops
+    // the current thread. A panic fails this test without terminating the pool.
+    defer report(t, start);
+    defer finish(t);
+    defer func() {
+        message := recover();
+        if (message != null) t.Error("panic: ", message);
+    }();
+    callback(t);
 }
-func (t *T) Run(name string, callback func(*T)) bool {
+func (t *T) newChild(name string) *T {
+    t.gate.Lock();
+    if (t.cleaning) {
+        t.gate.Unlock(); t.Error("cannot start a subtest during cleanup"); return null;
+    }
     if (name == "") name = "#00";
     base := name;
     index := 0;
@@ -108,14 +165,38 @@ func (t *T) Run(name string, callback func(*T)) bool {
         if (t.children[i] == name) { index++; name = base + "#" + io.Sprint(index); i = -1; }
     }
     t.children.append(name);
-    child: T;
+    t.gate.Unlock();
+    child := new(T);
     child.name = t.name + "/" + name;
-    execute(&child, callback);
-    if (child.failed) t.Fail();
-    return !child.failed;
+    child.parent = t;
+    return child;
 }
-// Runner entry points are used by ocean test's generated main package.
-func Start() { failures = 0; testNames = {}; event("start", "", "", 0); }
+func (t *T) Run(name string, callback func(*T)) bool {
+    child := t.newChild(name);
+    if (child == null) return false;
+    id := threads.Spawn(func() { execute(child, callback); });
+    defer releaseChild(childTask{id, child});
+    threads.Await(id);
+    return !child.Failed();
+}
+// Parallel starts an asynchronous subtest on a separate native thread. These
+// threads are independent of the top-level worker count, including -t 1.
+func (t *T) Parallel(name string, callback func(*T)) {
+    child := t.newChild(name);
+    if (child == null) return;
+    id := threads.Spawn(func() { execute(child, callback); });
+    t.gate.Lock(); t.pending.append(childTask{id, child}); t.gate.Unlock();
+}
+// Runner hooks: register every function before starting a bounded shared pool.
+func Start() {
+    failures = 0; nextJob = 0; testNames = {}; jobs = {}; workerCount = 16;
+    args := os.Args();
+    if (len(args) == 3 && args[1] == "--ocean-test-workers") {
+        workerCount = io.ParseInt(args[2]).unwrap();
+        if (workerCount < 1) panic "test worker count must be positive";
+    }
+    event("start", "", "", 0);
+}
 func RunTest(name string, callback func(*T)) {
     base := name;
     index := 0;
@@ -123,9 +204,35 @@ func RunTest(name string, callback func(*T)) {
         if (testNames[i] == name) { index++; name = base + "#" + io.Sprint(index); i = -1; }
     }
     testNames.append(name);
-    t: T;
-    t.name = name;
-    execute(&t, callback);
-    if (t.failed) failures++;
+    jobs.append(testJob{name, callback});
 }
-func Finish() int { event("complete", "", "", 0); return failures > 0 ? 1 : 0; }
+func worker() {
+    for (;;) {
+        poolGate.Lock();
+        if (nextJob == len(jobs)) { poolGate.Unlock(); return; }
+        job := jobs[nextJob]; nextJob++;
+        poolGate.Unlock();
+        t: T;
+        t.name = job.name; t.parent = null;
+        execute(&t, job.callback);
+    }
+}
+func Finish() int {
+    count := workerCount < len(jobs) ? workerCount : len(jobs);
+    workers := int[]{};
+    for (i := 0; i < count; i++) workers.append(threads.Spawn(worker));
+    for (len(workers) > 0) {
+        for (i := len(workers) - 1; i >= 0; i--) {
+            if (!threads.IsDone(workers[i])) continue;
+            threads.Await(workers[i]);
+            workers.remove(i);
+            // Fatal/SkipNow/threads.Return run defers and retire their worker.
+            // Reap it before replacement so the pool never exceeds its bound.
+            poolGate.Lock(); remaining := nextJob < len(jobs); poolGate.Unlock();
+            if (remaining) workers.append(threads.Spawn(worker));
+        }
+        if (len(workers) > 0) time.Sleep(time.Millisecond);
+    }
+    event("complete", "", "", 0);
+    return failures > 0 ? 1 : 0;
+}

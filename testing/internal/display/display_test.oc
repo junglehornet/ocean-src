@@ -1,0 +1,57 @@
+package main;
+import "testing";
+import "term/tui";
+
+func includes(text string, needle string) bool {
+    for (i := 0; i + len(needle) <= len(text); i++) {
+        matches := true;
+        for (j := 0; j < len(needle); j++) { if (text[i + j] != needle[j]) matches = false; }
+        if (matches) return true;
+    }
+    return false;
+}
+func TestLiveTransitions(t *testing.T) {
+    model := display{packageName: "example/package", width: 100, height: 24, started: now(), follow: true, showSkipped: true};
+    // Fragmented protocol reads must not expose half an event to the model.
+    model.Update(chunkMsg{"run\t0\t546573744f"});
+    if (len(model.rows) != 0) t.Fatal("accepted a partial event");
+    model.Update(chunkMsg{"6e65\t\npass\t0.25\t546573744f6e65\t\nrun\t0\t5465737454776f\t\n"});
+    if (len(model.rows) != 2 || model.rows[0].status != "pass" || model.rows[1].status != "run") t.Fatal("bad event transitions");
+    view := model.View();
+    if (!includes(view, "✓") || !includes(view, "TestOne") || !includes(view, "TestTwo") || !includes(view, "running")) t.Fatal("missing live status");
+    model.Update(chunkMsg{"output\t0\t5465737454776f\t6661696c7572650a\nfail\t0.5\t5465737454776f\t\n"});
+    view = model.View();
+    if (!includes(view, "✗") || !includes(view, "failure") || !model.failed) t.Fatal("failed test not displayed");
+    model.Update(chunkMsg{"done\t0.8\t\t31\n"});
+    if (!model.finished || !includes(model.View(), "FAILED")) t.Fatal("package failure missing");
+    model.Update(clearMsg{});
+    if (model.View() != "") t.Fatal("final live frame must be cleared before the report");
+}
+func TestResizeAndColor(t *testing.T) {
+    model := display{packageName: "example/package", width: 80, height: 24, started: now(), follow: true};
+    model.accept("run\t0\t5465737454797065\t");
+    model.Update(tui.WindowSizeMsg{40, 8});
+    if (model.width != 40 || model.height != 8) t.Fatal("resize not applied");
+    view := model.View();
+    if (includes(view, "\x1b[")) t.Fatal("NO_COLOR view contains SGR");
+    for (i, line := range split(view, '\n')) { if (cells(line) > 39) t.Errorf("line {} exceeds width: {}", i, line); }
+    model.color = true;
+    if (!includes(model.View(), "\x1b[32m")) t.Fatal("missing terminal color");
+    model.Update(tui.KeyMsg{Key: "ctrl+c"});
+    if (!model.cancelled || model.View() != "") t.Fatal("interrupt not handled");
+}
+func TestFollowAndScrolling(t *testing.T) {
+    model := display{packageName: "example/package", width: 100, height: 8, started: now(), follow: true};
+    // Populate directly to keep this test independent of integer hex formatting.
+    model.rows = {};
+    for (i := 0; i < 10; i++) model.rows.append(testRow{name: "Test" + ioName(i), status: "pass"});
+    if (!includes(model.View(), "Test9") || includes(model.View(), "Test0")) t.Fatal("view does not follow latest tests");
+    model.Update(tui.KeyMsg{Key: "pgup"});
+    if (!includes(model.View(), "Test0")) t.Fatal("cannot scroll to completed tests");
+    model.Update(tui.KeyMsg{Text: "f"});
+    if (!includes(model.View(), "Test9")) t.Fatal("follow did not resume");
+}
+func ioName(value int) string {
+    digits := "0123456789";
+    result := ""; result += digits[value]; return result;
+}
