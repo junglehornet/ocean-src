@@ -93,3 +93,41 @@ func TestInterleavedSubtestTrees(t *testing.T) {
     if (model.rows[second].status != "fail" || model.rows[firstChild].status != "pass" || model.rows[otherChild].status != "skip")
         t.Fatal("status updates no longer address the correct tests");
 }
+
+func TestPackageScopedNames(t *testing.T) {
+    model := display{width: 140, height: 40, started: now(), showSkipped: true};
+    model.accept("start\t0\t\t\t6578616d706c652e746573742f70726f6a6563742f61");
+    model.accept("run\t0\t5465737453616d65\t\t6578616d706c652e746573742f70726f6a6563742f61");
+    model.accept("run\t0\t5465737453616d652f6368696c64\t\t6578616d706c652e746573742f70726f6a6563742f61");
+    model.accept("pass\t0\t5465737453616d652f6368696c64\t\t6578616d706c652e746573742f70726f6a6563742f61");
+    model.accept("pass\t0\t5465737453616d65\t\t6578616d706c652e746573742f70726f6a6563742f61");
+    model.accept("pass\t0\t\t\t6578616d706c652e746573742f70726f6a6563742f61");
+    model.accept("start\t0\t\t\t6578616d706c652e746573742f70726f6a6563742f62");
+    model.accept("run\t0\t5465737453616d65\t\t6578616d706c652e746573742f70726f6a6563742f62");
+    model.accept("run\t0\t5465737453616d652f6368696c64\t\t6578616d706c652e746573742f70726f6a6563742f62");
+    model.accept("pass\t0\t5465737453616d652f6368696c64\t\t6578616d706c652e746573742f70726f6a6563742f62");
+    model.accept("pass\t0\t5465737453616d65\t\t6578616d706c652e746573742f70726f6a6563742f62");
+    model.accept("pass\t0\t\t\t6578616d706c652e746573742f70726f6a6563742f62");
+    if (len(model.rows) != 6) t.Fatal("package test names collided");
+    view := model.View();
+    if (!includes(view, "example.test/project/a") || !includes(view, "example.test/project/b")) t.Fatal("package headings missing");
+    for (i := 0; i < 6; i++) {
+        if (i % 3 == 0 && !model.rows[i].packageRow) t.Fatal("tests escaped their package subtree");
+    }
+}
+
+func TestPauseResumeAndPackageFold(t *testing.T) {
+    model := display{width: 140, height: 40, started: now(), showSkipped: true};
+    model.accept("start\t0\t\t\t6578616d706c652e746573742f67726f7570");
+    model.accept("run\t0\t54657374506172616c6c656c\t\t6578616d706c652e746573742f67726f7570");
+    if (!includes(model.View(), "=== RUN")) t.Fatal("missing === RUN display");
+    model.accept("pause\t0\t54657374506172616c6c656c\t\t6578616d706c652e746573742f67726f7570");
+    if (!includes(model.View(), "=== PAUSE")) t.Fatal("missing === PAUSE display");
+    model.accept("cont\t0\t54657374506172616c6c656c\t\t6578616d706c652e746573742f67726f7570");
+    if (!includes(model.View(), "=== CONT")) t.Fatal("missing === CONT display");
+    model.accept("pass\t0\t54657374506172616c6c656c\t\t6578616d706c652e746573742f67726f7570");
+    if (!includes(model.View(), "--- PASS:")) t.Fatal("missing --- PASS: display");
+    model.accept("pass\t0\t\t\t6578616d706c652e746573742f67726f7570");
+    if (!includes(model.View(), "example.test/group")) t.Fatal("missing example.test/group display");
+    if (includes(model.View(), "TestParallel")) t.Fatal("completed package did not fold");
+}

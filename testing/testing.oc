@@ -5,8 +5,9 @@ import "sync";
 import "os";
 import "time";
 
-// Top-level tests share a bounded pool. Async subtests use extra native
-// threads; a parent joins all of them before cleanup and final reporting.
+// Each package starts tests serially. Parallel marks and parks the calling
+// test until its parent serial phase ends. Execution slots are compiler-owned
+// and shared between every package selected by a single ocean test command.
 type cleanupCallback = func();
 struct childTask { id int; test *T; }
 struct testJob { name string; callback func(*T); }
@@ -15,6 +16,13 @@ struct T {
     parent *T;
     pending childTask[];
     cleaning bool;
+    signaled bool;
+    parallel bool;
+    childrenReady bool;
+    slot bool;
+    paused int;
+    started int;
+    owner int;
     name string;
     failed bool;
     skipped bool;
@@ -23,14 +31,15 @@ struct T {
 }
 struct clockValue { seconds int; nanos int; }
 extern i32 timespec_get(*clockValue value, i32 base);
+extern int read(i32 fd, buffer<i8> bytes, uint count);
 extern int write(i32 fd, buffer<i8> bytes, uint count);
 lock: sync.Mutex;
 failures: int;
 testNames: string[];
 poolGate: sync.Mutex;
 jobs: testJob[];
-nextJob: int;
 workerCount: int;
+serialDone: bool;
 
 func now() int {
     value: clockValue;
@@ -115,22 +124,27 @@ func clean(t *T) {
     }();
     runCleanups(t);
 }
-func releaseChild(child childTask) {
-    threads.Await(child.id);
-    free(child.test);
+func acquire(t *T) {
+    event("acquire", "", "", 0);
+    byte: i8[1];
+    for (extern.read(199->i32, byte.data, 1->uint) != 1) time.Sleep(time.Millisecond);
+    t.slot = true;
 }
+func release(t *T) {
+    if (t.slot) { t.slot = false; event("release", "", "", 0); }
+}
+func releaseChild(child childTask) { threads.Await(child.id); free(child.test); }
 func finish(t *T) {
-    // Join children before parent cleanups, even when the body called Fatal.
-    defer clean(t);
+    t.gate.Lock(); t.childrenReady = true; hasChildren := len(t.pending) > 0; t.gate.Unlock();
+    if (hasChildren) release(t);
     for (;;) {
         t.gate.Lock();
-        if (len(t.pending) == 0) { t.gate.Unlock(); return; }
-        last := len(t.pending) - 1;
-        child := t.pending[last];
-        t.pending.remove(last);
-        t.gate.Unlock();
-        releaseChild(child);
+        if (len(t.pending) == 0) { t.gate.Unlock(); break; }
+        last := len(t.pending) - 1; child := t.pending[last]; t.pending.remove(last);
+        t.gate.Unlock(); releaseChild(child);
     }
+    if (!t.slot) acquire(t);
+    clean(t);
 }
 func report(t *T, start int) {
     failed := t.Failed();
@@ -138,13 +152,17 @@ func report(t *T, start int) {
         if (t.parent != null) t.parent.Fail();
         else { poolGate.Lock(); failures++; poolGate.Unlock(); }
     }
-    event(failed ? "fail" : (t.Skipped() ? "skip" : "pass"), t.name, "", now() - start);
+    event(failed ? "fail" : (t.Skipped() ? "skip" : "pass"), t.name, "", now() - start - t.paused);
+    t.gate.Lock(); t.signaled = true; t.gate.Unlock();
 }
 func execute(t *T, callback func(*T)) {
-    start := now();
+    acquire(t);
+    t.owner = threads.CurrentID();
+    start := now(); t.started = start;
     event("run", t.name, "", 0);
     // Separate deferred frames preserve reporting if a cleanup itself stops
     // the current thread. A panic fails this test without terminating the pool.
+    defer release(t);
     defer report(t, start);
     defer finish(t);
     defer func() {
@@ -174,22 +192,40 @@ func (t *T) newChild(name string) *T {
 func (t *T) Run(name string, callback func(*T)) bool {
     child := t.newChild(name);
     if (child == null) return false;
-    id := threads.Spawn(func() { execute(child, callback); });
-    defer releaseChild(childTask{id, child});
-    threads.Await(id);
-    return !child.Failed();
-}
-// Parallel starts an asynchronous subtest on a separate native thread. These
-// threads are independent of the top-level worker count, including -t 1.
-func (t *T) Parallel(name string, callback func(*T)) {
-    child := t.newChild(name);
-    if (child == null) return;
+    release(t);
     id := threads.Spawn(func() { execute(child, callback); });
     t.gate.Lock(); t.pending.append(childTask{id, child}); t.gate.Unlock();
+    for (;;) {
+        child.gate.Lock(); ready := child.signaled; child.gate.Unlock();
+        if (ready) break;
+        time.Sleep(time.Millisecond);
+    }
+    acquire(t);
+    return !child.Failed();
+}
+// Parallel pauses the calling test; it does not create a named callback.
+func (t *T) Parallel() {
+    if (threads.CurrentID() != t.owner) panic "Parallel must run on the test's own thread";
+    t.gate.Lock(); invalid := t.parallel || t.cleaning; t.parallel = true; t.gate.Unlock();
+    if (invalid) panic "Parallel called twice or during cleanup";
+    pause := now();
+    event("pause", t.name, "", pause - t.started - t.paused);
+    release(t);
+    t.gate.Lock(); t.signaled = true; t.gate.Unlock();
+    for (;;) {
+        ready := false;
+        if (t.parent == null) { poolGate.Lock(); ready = serialDone; poolGate.Unlock(); }
+        else { t.parent.gate.Lock(); ready = t.parent.childrenReady; t.parent.gate.Unlock(); }
+        if (ready) break;
+        time.Sleep(time.Millisecond);
+    }
+    acquire(t);
+    t.paused += now() - pause;
+    event("cont", t.name, "", now() - t.started - t.paused);
 }
 // Runner hooks: register every function before starting a bounded shared pool.
 func Start() {
-    failures = 0; nextJob = 0; testNames = {}; jobs = {}; workerCount = 16;
+    failures = 0; serialDone = false; testNames = {}; jobs = {}; workerCount = 16;
     args := os.Args();
     if (len(args) == 3 && args[1] == "--ocean-test-workers") {
         workerCount = io.ParseInt(args[2]).unwrap();
@@ -206,33 +242,21 @@ func RunTest(name string, callback func(*T)) {
     testNames.append(name);
     jobs.append(testJob{name, callback});
 }
-func worker() {
-    for (;;) {
-        poolGate.Lock();
-        if (nextJob == len(jobs)) { poolGate.Unlock(); return; }
-        job := jobs[nextJob]; nextJob++;
-        poolGate.Unlock();
-        t: T;
-        t.name = job.name; t.parent = null;
-        execute(&t, job.callback);
-    }
-}
 func Finish() int {
-    count := workerCount < len(jobs) ? workerCount : len(jobs);
-    workers := int[]{};
-    for (i := 0; i < count; i++) workers.append(threads.Spawn(worker));
-    for (len(workers) > 0) {
-        for (i := len(workers) - 1; i >= 0; i--) {
-            if (!threads.IsDone(workers[i])) continue;
-            threads.Await(workers[i]);
-            workers.remove(i);
-            // Fatal/SkipNow/threads.Return run defers and retire their worker.
-            // Reap it before replacement so the pool never exceeds its bound.
-            poolGate.Lock(); remaining := nextJob < len(jobs); poolGate.Unlock();
-            if (remaining) workers.append(threads.Spawn(worker));
+    tasks := childTask[]{};
+    for (i := 0; i < len(jobs); i++) {
+        job := jobs[i];
+        t := new(T); t.name = job.name; t.parent = null;
+        id := threads.Spawn(func() { execute(t, job.callback); });
+        tasks.append(childTask{id, t});
+        for (;;) {
+            t.gate.Lock(); ready := t.signaled; t.gate.Unlock();
+            if (ready) break;
+            time.Sleep(time.Millisecond);
         }
-        if (len(workers) > 0) time.Sleep(time.Millisecond);
     }
+    poolGate.Lock(); serialDone = true; poolGate.Unlock();
+    for (i := 0; i < len(tasks); i++) releaseChild(tasks[i]);
     event("complete", "", "", 0);
     return failures > 0 ? 1 : 0;
 }
