@@ -17,9 +17,14 @@ func columns(scalar int) int {
         (scalar >= 131072 && scalar <= 262141)) return 2;
     return 1;
 }
-func byteText(byte i8) string { bytes := i8[]{byte}; return bytes -> string; }
+// A tab can expand to at most eight spaces; reserve once for the worst case.
+// Write through the buffer to avoid copying owned storage on every append.
 func frame(view string, size term.Size) (string, int) {
-    result := "";
+    storage := i8[len(view)*8+4];
+    result := storage.data;
+    used := 0;
+    bytes := view -> i8[];
+    source := bytes.data;
     row := 0;
     column := 0;
     clipped := false;
@@ -27,19 +32,19 @@ func frame(view string, size term.Size) (string, int) {
     width := size.Width > 1 ? size.Width - 1 : 0;
     height := size.Height > 0 ? size.Height : 1;
     for (i := 0; i < len(view);) {
-        byte := (view[i] -> u8) -> int;
+        byte := (source[i] -> u8) -> int;
         if (byte == 10) {
             if (row + 1 >= height) break;
-            result += "\r\n"; row++; column = 0; clipped = false; i++; continue;
+            result[used] = 13; result[used+1] = 10; used += 2; row++; column = 0; clipped = false; i++; continue;
         }
         if (byte == 27) {
             // View permits SGR colors/styles; ignore terminal control sequences.
             end := i + 1;
-            if (end < len(view) && view[end] == 91) {
+            if (end < len(view) && source[end] == 91) {
                 end++;
-                for (; end < len(view) && end - i < 64 && view[end] >= 32 && view[end] <= 63; end++) {}
-                if (end < len(view) && view[end] >= 64 && view[end] <= 126) {
-                    if (view[end] == 109) for (j := i; j <= end; j++) result += byteText(view[j]);
+                for (; end < len(view) && end - i < 64 && source[end] >= 32 && source[end] <= 63; end++) {}
+                if (end < len(view) && source[end] >= 64 && source[end] <= 126) {
+                    if (source[end] == 109) for (j := i; j <= end; j++) { result[used] = source[j]; used++; }
                     i = end + 1; continue;
                 }
             }
@@ -47,23 +52,24 @@ func frame(view string, size term.Size) (string, int) {
         }
         if (byte == 9) {
             spaces := 8 - column % 8;
-            for (j := 0; j < spaces && column < width && !clipped; j++) { result += " "; column++; }
+            for (j := 0; j < spaces && column < width && !clipped; j++) { result[used] = 32; used++; column++; }
             i++; continue;
         }
         if (byte < 32 || byte == 127) { i++; continue; }
         length := byte < 128 ? 1 : (byte < 224 ? 2 : (byte < 240 ? 3 : 4));
         if (i + length > len(view)) break;
         scalar := byte < 128 ? byte : (byte & (length == 2 ? 31 : (length == 3 ? 15 : 7)));
-        for (j := 1; j < length; j++) scalar = scalar * 64 + ((view[i + j] -> u8) -> int & 63);
+        for (j := 1; j < length; j++) scalar = scalar * 64 + ((source[i + j] -> u8) -> int & 63);
         count := columns(scalar);
         if (column + count > width) clipped = true;
         if (!clipped) {
-            for (j := 0; j < length; j++) result += byteText(view[i + j]);
+            for (j := 0; j < length; j++) { result[used] = source[i+j]; used++; }
             column += count;
         }
         i += length;
     }
-    return result + "\x1b[0m", row;
+    result[used] = 27; result[used+1] = 91; result[used+2] = 48; result[used+3] = 109; used += 4;
+    return storage[:used] -> string, row;
 }
 func render(output os.File, view string, previousRows int, alternate bool, size term.Size) Result<int> {
     prefix := "\r";
