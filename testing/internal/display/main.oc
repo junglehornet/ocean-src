@@ -80,6 +80,28 @@ func (model *display) Init() tui.Cmd {
     model.started = now();
     return tui.Batch(readEvents, tui.Tick(80 * time.Millisecond, tickMsg{}));
 }
+// Slash boundaries define ancestry: TestOneMore is not a child of TestOne.
+func descendant(name string, parent string) bool {
+    boundary := len(parent);
+    if (len(name) <= boundary || name[boundary] != '/') return false;
+    for (i := 0; i < len(parent); i++) { if (name[i] != parent[i]) return false; }
+    return true;
+}
+func (model *display) insertion(name string) int {
+    parent := "";
+    position := len(model.rows);
+    // Find the nearest known ancestor, including when a subtest's name itself
+    // contains slashes without a separately registered intermediate test.
+    for (i := 0; i < len(model.rows); i++) {
+        candidate := model.rows[i].name;
+        if (len(candidate) > len(parent) && descendant(name, candidate)) {
+            parent = candidate; position = i + 1;
+        }
+    }
+    if (parent == "") return position;
+    for (position < len(model.rows) && descendant(model.rows[position].name, parent)) position++;
+    return position;
+}
 func (model *display) accept(line string) {
     fields := split(line, '\t');
     if (len(fields) != 4) return;
@@ -96,9 +118,9 @@ func (model *display) accept(line string) {
     if (name == "") { if (action == "output") model.packageOutput += output; return; }
     index, present := model.indexes[name];
     if (!present) {
-        index = len(model.rows);
-        model.indexes[name] = index;
-        model.rows.append(testRow{name: name, status: "run", start: now()});
+        index = model.insertion(name);
+        model.rows.add(index, testRow{name: name, status: "run", start: now()});
+        for (i := index; i < len(model.rows); i++) { key := model.rows[i].name; model.indexes[key] = i; }
     }
     if (action == "output") model.rows[index].output += output;
     else {

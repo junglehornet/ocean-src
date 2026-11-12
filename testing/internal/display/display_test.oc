@@ -55,3 +55,41 @@ func ioName(value int) string {
     digits := "0123456789";
     result := ""; result += digits[value]; return result;
 }
+
+func position(text string, needle string) int {
+    for (i := 0; i + len(needle) <= len(text); i++) {
+        found := true;
+        for (j := 0; j < len(needle); j++) { if (text[i + j] != needle[j]) found = false; }
+        if (found) return i;
+    }
+    return -1;
+}
+func TestInterleavedSubtestTrees(t *testing.T) {
+    model := display{packageName: "example/package", width: 120, height: 40, started: now(), follow: true, showSkipped: true};
+    model.accept("run\t0\t546573744f6e65\t");
+    model.accept("run\t0\t5465737454776f\t");
+    model.accept("run\t0\t546573744f6e654d6f7265\t");
+    model.accept("run\t0\t546573744f6e652f616c706861\t");
+    model.accept("run\t0\t5465737454776f2f616c706861\t");
+    model.accept("run\t0\t546573744f6e652f62657461\t");
+    model.accept("run\t0\t546573744f6e652f616c7068612f64656570\t");
+    model.accept("run\t0\t546573744f6e654d6f72652f616c706861\t");
+    model.accept("pass\t0\t546573744f6e652f616c706861\t");
+    model.accept("fail\t0\t5465737454776f\t");
+    model.accept("skip\t0\t546573744f6e654d6f72652f616c706861\t");
+    expected := string[8]{"TestOne", "TestOne/alpha", "TestOne/alpha/deep", "TestOne/beta", "TestTwo", "TestTwo/alpha", "TestOneMore", "TestOneMore/alpha"};
+    view := model.View();
+    previous := -1;
+    for (i, name := range expected) {
+        at := position(view, name + " ");
+        if (at <= previous) t.Fatalf("{} is not rendered beneath its parent: {}", name, view);
+        previous = at;
+    }
+    // Inserting rows shifts indexes; later status updates must still reach
+    // the original test rather than whichever row now occupies its old slot.
+    second := model.indexes["TestTwo"];
+    firstChild := model.indexes["TestOne/alpha"];
+    otherChild := model.indexes["TestOneMore/alpha"];
+    if (model.rows[second].status != "fail" || model.rows[firstChild].status != "pass" || model.rows[otherChild].status != "skip")
+        t.Fatal("status updates no longer address the correct tests");
+}
