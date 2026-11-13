@@ -20,7 +20,12 @@ with tempfile.TemporaryDirectory(prefix='ocean exec fixture ') as directory:
                OCEAN_EXEC_FIXTURE_DIR=str(root), OCEAN_BUILD_CACHE='off')
     command = [str(compiler), 'test', str(stdlib/'os/exec'), '--notty', '--timeout', '120s']
     print('exec fixture test:', command, flush=True)
-    result = subprocess.run(command, env=env, encoding='utf-8', capture_output=True, timeout=240)
+    try:
+        result = subprocess.run(command, env=env, encoding='utf-8', capture_output=True, timeout=240)
+    except subprocess.TimeoutExpired as error:
+        print('TIMED OUT exec fixture:', command, 'stdout=', error.stdout,
+              'stderr=', error.stderr, flush=True)
+        raise
     print(result.stdout, end='', flush=True)
     print(result.stderr, end='', file=sys.stderr, flush=True)
     assert result.returncode == 0, result.returncode

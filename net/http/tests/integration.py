@@ -28,7 +28,18 @@ scale = int(os.environ.get('OCEAN_HTTP_TIMING_SCALE', '1'))
 assert 1 <= scale <= 20
 
 def command(*argv):
-    p = subprocess.run([str(a) for a in argv], capture_output=True, text=True,encoding="utf-8", timeout=180 + 45 * scale, env=env)
+    timeout = 180 + 45 * scale
+    print('START HTTP fixture:', *map(str, argv), 'timeout=', timeout, flush=True)
+    started = time.monotonic()
+    try:
+        p = subprocess.run([str(a) for a in argv], capture_output=True, text=True,
+                           encoding="utf-8", timeout=timeout, env=env)
+    except subprocess.TimeoutExpired as error:
+        print('TIMED OUT HTTP fixture:', argv, 'stdout=', error.stdout,
+              'stderr=', error.stderr, flush=True)
+        raise
+    print('DONE HTTP fixture:', argv[0], 'exit=', p.returncode,
+          'elapsed=', round(time.monotonic() - started, 2), flush=True)
     assert p.returncode == 0, (argv, p.returncode, p.stdout, p.stderr)
     return p
 
