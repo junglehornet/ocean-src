@@ -10,8 +10,11 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import sys
 import threading
 import time
+
+if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('compiler', type=Path)
@@ -25,7 +28,7 @@ scale = int(os.environ.get('OCEAN_HTTP_TIMING_SCALE', '1'))
 assert 1 <= scale <= 20
 
 def command(*argv):
-    p = subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=180 + 45 * scale, env=env)
+    p = subprocess.run([str(a) for a in argv], capture_output=True, text=True,encoding="utf-8", timeout=180 + 45 * scale, env=env)
     assert p.returncode == 0, (argv, p.returncode, p.stdout, p.stderr)
     return p
 

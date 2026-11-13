@@ -2,15 +2,18 @@ name: Native standard-library platforms
 
 on:
   pull_request:
-    paths: ['net/http/**', 'time/**', 'os/exec/**', 'encoding/json/**', '.github/workflows/http-platforms.yml']
+    paths: ['net/http/**', 'time/**', 'os/exec/**', 'encoding/json/**', '.github/workflows/http-platforms.yml', '.github/scripts/**']
   push:
-    paths: ['net/http/**', 'time/**', 'os/exec/**', 'encoding/json/**', '.github/workflows/http-platforms.yml']
+    paths: ['net/http/**', 'time/**', 'os/exec/**', 'encoding/json/**', '.github/workflows/http-platforms.yml', '.github/scripts/**']
   workflow_dispatch:
     inputs:
       compiler_ref:
         description: 'Compiler revision with native platform support and libcurl auto-linking'
         default: main
         required: true
+
+env:
+  PYTHONUTF8: "1"
 
 permissions:
   contents: read
@@ -47,12 +50,9 @@ jobs:
         name: Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 lld-19 libffi-dev libcurl4-openssl-dev openssl ninja-build
+          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev openssl ninja-build
           python3 -m pip install 'cmake>=4.2,<5'
-          mkdir -p "$RUNNER_TEMP/ocean-tools"
-          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/ocean-tools/clang"
-          ln -s /usr/bin/wasm-ld-19 "$RUNNER_TEMP/ocean-tools/wasm-ld"
-          echo "$RUNNER_TEMP/ocean-tools" >> "$GITHUB_PATH"
+          bash ocean-src/.github/scripts/install-llvm.sh
       - if: matrix.os == 'macos'
         name: macOS dependencies
         run: |
@@ -81,6 +81,10 @@ jobs:
       - if: matrix.os != 'windows'
         name: Build and test Unix
         run: |
+          set -euo pipefail
+          clang --version
+          [[ "$(clang -dumpversion)" == 23.* ]]
+          llvm-ar --version
           cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$GITHUB_WORKSPACE/ocean-src"
           cmake --build ocean-c/build --target ocean-c -j 4
           export OCEAN_SRC="$GITHUB_WORKSPACE/ocean-src"
@@ -92,10 +96,15 @@ jobs:
         name: Build and test Windows
         shell: msys2 {0}
         run: |
+          set -euo pipefail
+          clang --version
+          [[ "$(clang -dumpversion)" == 23.* ]]
+          llvm-ar --version
           cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$(cygpath -m "$PWD/ocean-src")" -DCMAKE_RC_COMPILER=llvm-rc
           cmake --build ocean-c/build --target ocean-c -j 4
           export OCEAN_SRC="$(cygpath -m "$PWD/ocean-src")"
           ocean-c/build/ocean-c.exe test ocean-src/net/http ocean-src/time ocean-src/os/exec ocean-src/encoding/json --notty --timeout 30s
+          python ocean-src/os/exec/tests/integration.py ocean-c/build/ocean-c.exe
           python ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c.exe
           python ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c.exe --cache "$(cygpath -m "$RUNNER_TEMP/http-cache")"
           python ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c.exe
@@ -118,14 +127,15 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 lld-19 libffi-dev libcurl4-openssl-dev ninja-build
+          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev ninja-build
           python3 -m pip install 'cmake>=4.2,<5'
-          mkdir -p "$RUNNER_TEMP/ocean-tools"
-          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/ocean-tools/clang"
-          ln -s /usr/bin/wasm-ld-19 "$RUNNER_TEMP/ocean-tools/wasm-ld"
-          echo "$RUNNER_TEMP/ocean-tools" >> "$GITHUB_PATH"
+          bash ocean-src/.github/scripts/install-llvm.sh
       - name: Compile and execute Wasm smoke tests
         run: |
+          set -euo pipefail
+          clang --version
+          [[ "$(clang -dumpversion)" == 23.* ]]
+          llvm-ar --version
           cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$GITHUB_WORKSPACE/ocean-src"
           cmake --build ocean-c/build --target ocean-c asm_backend_probe -j 4
           python3 ocean-src/net/http/tests/wasm.py ocean-c/build/ocean-c
@@ -154,8 +164,14 @@ jobs:
           base_image: --platform=linux/riscv64 riscv64/ubuntu:26.04
           install: |
             apt-get update
-            apt-get install -y clang libffi-dev libcurl4-openssl-dev openssl cmake ninja-build python3
+            apt-get install -y clang-21 lld-21 llvm-21 libffi-dev libcurl4-openssl-dev openssl cmake ninja-build python3
           run: |
+            set -eu
+            mkdir -p /tmp/ocean-tools
+            for tool in clang wasm-ld ld.lld llvm-ar llvm-ranlib; do ln -sf "/usr/bin/$tool-21" "/tmp/ocean-tools/$tool"; done
+            export PATH="/tmp/ocean-tools:$PATH" PYTHONUTF8=1
+            export OCEAN_HTTP_BUILD_TIMEOUT=900
+            clang --version
             cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$PWD/ocean-src"
             cmake --build ocean-c/build --target ocean-c -j 4
             export OCEAN_SRC="$PWD/ocean-src"

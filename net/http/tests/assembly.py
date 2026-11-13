@@ -26,10 +26,10 @@ with tempfile.TemporaryDirectory(prefix='ocean-clock-asm-') as tmp:
     for selector,body in blocks.items():
         program=root/'probe.oc'
         program.write_text('package probe; func sample() { asm '+selector+' {\n'+body+'\n} }')
-        result=subprocess.run([probe,str(program)],capture_output=True,text=True,timeout=30)
+        result=subprocess.run([probe,str(program)],capture_output=True,text=True,encoding="utf-8",timeout=30)
         assert result.returncode==0,(selector,result.stderr)
         ir=root/'module.ll';ir.write_text(result.stdout)
         for optimization in ('-O0','-O2'):
-            result=subprocess.run([clang,'--target='+targets[selector],optimization,'-Wno-override-module','-x','ir',str(ir),'-c','-o',str(root/'clock.o')],capture_output=True,text=True,timeout=30)
+            result=subprocess.run([clang,'--target='+targets[selector],optimization,'-Wno-override-module','-x','ir',str(ir),'-c','-o',str(root/'clock.o')],capture_output=True,text=True,encoding="utf-8",timeout=30)
             assert result.returncode==0,(selector,optimization,result.stderr)
 print('All seven monotonic-clock variants assembled at -O0 and -O2')

@@ -148,3 +148,9 @@ cold/hot/uncached modules and runs a custom host-transport smoke test in Node;
 its minimal allocator shim is test-only, not a production runtime/Fetch adapter.
 The assembly test checks all seven clock variants at -O0/-O2. The CI workflow
 covers each native target plus Wasm; foreign execution requires those CI runners.
+
+CI uses Clang/LLD 23 for native x86-64/AArch64 and JavaScript/Wasm. RISC-V uses
+the Ubuntu 26.04 native Clang 21 toolchain. The linking harness accepts
+`OCEAN_HTTP_BUILD_TIMEOUT` in seconds (default 120, CI uses 900 under QEMU);
+this compile budget does not change HTTP request deadlines. Subprocess output
+is decoded as UTF-8 on every host.
