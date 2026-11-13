@@ -16,12 +16,15 @@ func TestCombinedOutput(t *testing.T) {
 func TestExitAndErrors(t *testing.T) {
     if (windows()) { t.Skip("POSIX utility fixture; native Windows coverage below"); return; }
     c := Command("/bin/sh", "-c", "exit 7");
-    if (!c.Run().hasError() || c.ExitCode != 7) t.Fatal("exit status");
+    if (!diagnosticRun(t, "exit 7", &c).hasError() || c.ExitCode != 7) t.Fatal("exit status");
     missing := Command("/definitely/no/executable");
     if (!missing.Output().hasError()) t.Fatal("missing executable");
     bad := Command("printf", "a\0b");
     if (!bad.Run().hasError()) t.Fatal("NUL accepted");
-    ok := Command("/bin/true"); if (ok.Run().unwrap() != 0) t.Fatal("Run");
+    ok := Command("/bin/sh", "-c", "exit 0");
+    result := diagnosticRun(t, "successful exit", &ok);
+    if (result.hasError()) t.Fatalf("Run: {}", result.error());
+    if (result.unwrap() != 0) t.Fatal("Run");
 }
 func TestLargeOutput(t *testing.T) {
     if (windows()) { t.Skip("POSIX utility fixture; native Windows coverage below"); return; }
@@ -33,9 +36,9 @@ func TestDirectoryAndEnvironment(t *testing.T) {
     c := Command("/bin/sh", "-c", "printf '%s|' \"$OCEAN_EXEC_TEST\"; pwd");
     c.Dir = "/"; c.Env = string[]{"OCEAN_EXEC_TEST=custom"};
     if (c.Output().unwrap() != "custom|/\n") t.Fatal("directory/environment");
-    bad := Command("/bin/true"); bad.Dir = "/not/a/real/directory";
+    bad := Command("/bin/sh", "-c", "exit 0"); bad.Dir = "/not/a/real/directory";
     if (!bad.Run().hasError()) t.Fatal("invalid directory");
-    badEnv := Command("/bin/true"); badEnv.Env = string[]{"X=bad\0value"};
+    badEnv := Command("/bin/sh", "-c", "exit 0"); badEnv.Env = string[]{"X=bad\0value"};
     if (!badEnv.Run().hasError()) t.Fatal("invalid environment");
 }
 func TestLookPath(t *testing.T) {
