@@ -44,9 +44,15 @@ func main() int {
     def build(*args):
         result=subprocess.run([str(compiler),*map(str,args)],env=env,capture_output=True,text=True,timeout=120)
         assert result.returncode==0,(args,result.stdout,result.stderr)
+    cached_modules=[]
     for _ in range(2):
         build('build',source,'-o',module)
         assert module.read_bytes()[:4]==b'\0asm'
+        validated=subprocess.run([node,'-e',
+            "new WebAssembly.Module(require('fs').readFileSync(process.argv[1]))",str(module)],
+            capture_output=True,text=True,timeout=30)
+        assert validated.returncode==0,(validated.stdout,validated.stderr)
+        cached_modules.append(module.read_bytes())
     build('check',source)
     build('build',stdlib/'net/http','-o',root/'http.o')
     env['OCEAN_BUILD_CACHE']='off'
@@ -71,6 +77,8 @@ const env={
   memcpy(d,s,n){new Uint8Array(instance.exports.memory.buffer).copyWithin(d,s,s+Number(n));return d;},
   memmove(d,s,n){return env.memcpy(d,s,n);},
   memset(d,v,n){new Uint8Array(instance.exports.memory.buffer).fill(v,d,d+Number(n));return d;},
+  strlen(p){const bytes=new Uint8Array(instance.exports.memory.buffer);let n=0;
+    while(bytes[p+n]!==0)n++;return n;},
   ocean_time_monotonic_ns(){return 1000000000n;},
   longjmp(){throw Error('unexpected longjmp');},
   dprintf(){throw Error('unexpected diagnostic');},
@@ -84,6 +92,8 @@ const status=instance.exports.main();
 if(status!==0)throw Error('HTTP Wasm smoke returned '+status);
 console.log('HTTP Wasm host transport, deadline, pre-cancel and missing-adapter behavior passed');
 ''')
-    result=subprocess.run([node,str(script),str(module)],capture_output=True,text=True,timeout=30)
-    assert result.returncode==0,(result.stdout,result.stderr)
+    for data in [*cached_modules,module.read_bytes()]:
+        module.write_bytes(data)
+        result=subprocess.run([node,str(script),str(module)],capture_output=True,text=True,timeout=30)
+        assert result.returncode==0,(result.stdout,result.stderr)
     print(result.stdout.strip())

@@ -37,14 +37,14 @@ func main() int {
         result=[]
         for path in (cache/'v1/data').glob('*/*'):
             data=path.read_bytes()
-            if len(data)==3 and all(byte in b'01' for byte in data): result.append(data)
+            if len(data)==4 and all(byte in b'01' for byte in data): result.append(data)
         return result
-    assert any(flags[-1:]==b'1' for flags in metadata(root/'cache'))
+    assert any(flags[2:3]==b'1' for flags in metadata(root/'cache'))
     source.write_text('package main; func main() int { return 0; }')
     env['OCEAN_BUILD_CACHE']=str(root/'plain-cache')
     run(compiler, 'build', source, '-o', binary)
     run(binary)
     run(compiler, 'build', source, '-o', binary)
     plain=metadata(root/'plain-cache')
-    assert plain and all(flags[-1:]==b'0' for flags in plain)
+    assert plain and all(flags[2:3]==b'0' for flags in plain)
 print('HTTP cold/hot/uncached linking and no-curl metadata for unrelated programs passed')
