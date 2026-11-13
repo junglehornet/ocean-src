@@ -280,7 +280,7 @@ architectures; portable Ocean routines cover the remaining paths.
   precise Number values, heterogeneous arrays, objects, and struct encoding.
 - [`os/exec`](os/exec/README.md): Command, LookPath, Run, Output, and
   CombinedOutput, with working-directory and environment configuration on
-  Linux x86-64.
+  all seven native targets.
 
 These packages use `Result<T>` for recoverable errors. See each package's README
 for its supported subset of the Go APIs. `io.FormatFloat(value float) string`

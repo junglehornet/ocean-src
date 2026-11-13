@@ -48,7 +48,7 @@ response = client.Do(request).unwrap();
 The built-in native transport verifies both the certificate chain and hostname,
 uses the libcurl backend's default trust store, and requires TLS 1.2 or newer.
 `client.TLSClientConfig.RootCAFile` optionally selects a PEM trust bundle for a
-private CA. There is no option to disable certificate verification. TLS settings
+private CA. Windows uses the OS trust store with libcurl 7.71+ when no private CA file is selected, so relocated executables do not depend on a build-machine PEM path. There is no option to disable certificate verification. TLS settings
 apply to the built-in native transport; custom transports configure their own.
 
 Timeout is a nonnegative nanosecond budget; use `time.Second` and

@@ -1,10 +1,10 @@
-name: HTTP native platforms
+name: Native standard-library platforms
 
 on:
   pull_request:
-    paths: ['net/http/**', 'time/**', '.github/workflows/http-platforms.yml']
+    paths: ['net/http/**', 'time/**', 'os/exec/**', 'encoding/json/**', '.github/workflows/http-platforms.yml']
   push:
-    paths: ['net/http/**', 'time/**', '.github/workflows/http-platforms.yml']
+    paths: ['net/http/**', 'time/**', 'os/exec/**', 'encoding/json/**', '.github/workflows/http-platforms.yml']
   workflow_dispatch:
     inputs:
       compiler_ref:
@@ -84,7 +84,7 @@ jobs:
           cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$GITHUB_WORKSPACE/ocean-src"
           cmake --build ocean-c/build --target ocean-c -j 4
           export OCEAN_SRC="$GITHUB_WORKSPACE/ocean-src"
-          ocean-c/build/ocean-c test ocean-src/net/http ocean-src/time --notty --timeout 30s
+          ocean-c/build/ocean-c test ocean-src/net/http ocean-src/time ocean-src/os/exec ocean-src/encoding/json --notty --timeout 30s
           python3 ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c
           python3 ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c --cache "$RUNNER_TEMP/http-cache"
           python3 ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c
@@ -92,10 +92,10 @@ jobs:
         name: Build and test Windows
         shell: msys2 {0}
         run: |
-          cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$(cygpath -m "$PWD/ocean-src")"
+          cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$(cygpath -m "$PWD/ocean-src")" -DCMAKE_RC_COMPILER=llvm-rc
           cmake --build ocean-c/build --target ocean-c -j 4
           export OCEAN_SRC="$(cygpath -m "$PWD/ocean-src")"
-          ocean-c/build/ocean-c.exe test ocean-src/net/http ocean-src/time --notty --timeout 30s
+          ocean-c/build/ocean-c.exe test ocean-src/net/http ocean-src/time ocean-src/os/exec ocean-src/encoding/json --notty --timeout 30s
           python ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c.exe
           python ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c.exe --cache "$(cygpath -m "$RUNNER_TEMP/http-cache")"
           python ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c.exe
@@ -159,6 +159,6 @@ jobs:
             cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$PWD/ocean-src"
             cmake --build ocean-c/build --target ocean-c -j 4
             export OCEAN_SRC="$PWD/ocean-src"
-            ocean-c/build/ocean-c test ocean-src/net/http ocean-src/time --notty --timeout 60s
+            ocean-c/build/ocean-c test ocean-src/net/http ocean-src/time ocean-src/os/exec ocean-src/encoding/json --notty --timeout 60s
             OCEAN_HTTP_TIMING_SCALE=5 python3 ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c
             python3 ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c

@@ -1,6 +1,7 @@
 # os/exec
 
-Go-inspired process execution for Linux x86-64 using POSIX spawn. Arguments go
+Go-inspired process execution on Linux (x86-64, AArch64, RISC-V), macOS
+(x86-64, AArch64), and Windows (x86-64, AArch64). Arguments go
 directly to the executable; no shell is inserted. Functions return `Result<T>`.
 
 ```ocean
@@ -37,9 +38,13 @@ actions are released, and interrupted waits are retried. Output is returned
 as an owned string, including embedded NUL bytes.
 
 The initial implementation has no Start/Wait, pipes, configurable standard
-streams, context cancellation, timeout, or Windows/macOS backend. Empty Env
+streams, context cancellation, timeout, or Wasm backend. Empty Env
 cannot request an empty child environment. Child output capture requires a
 writable system temporary directory and has no output-size bound.
 
-Run `ocean test os/exec`; tests use local Unix tools and do not require network
+Run `ocean test os/exec`; tests use local Unix tools or Windows PowerShell and do not require network
 access. Use the matching compiler and this standard-library source tree.
+
+The matching compiler supplies the native process bridge: POSIX spawn on Unix
+and Unicode CreateProcess on Windows. Windows argument quoting preserves spaces,
+quotes and backslashes without invoking a shell.

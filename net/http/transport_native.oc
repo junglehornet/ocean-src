@@ -27,6 +27,7 @@ optNoSignal: i32 = 99;
 optVerifyPeer: i32 = 64;
 optVerifyHost: i32 = 81;
 optSSLVersion: i32 = 32;
+optSSLOptions: i32 = 216;
 optProtocols: i32 = 181;
 optHTTPVersion: i32 = 84;
 curlAgain: i32 = 81;
@@ -80,6 +81,13 @@ func exchange(client Client, request Request, wire string, deadline int) Result<
         !setLong(easy, optVerifyPeer, 1) || !setLong(easy, optVerifyHost, 2) ||
         !setLong(easy, optSSLVersion, 6) || !setLong(easy, optProtocols, 3) || !setLong(easy, optHTTPVersion, 2))
         return Result<Response>.error("http: transport setup failed");
+    // A relocatable Windows executable must not depend on a build machine's
+    // PEM path. OpenSSL supports the Windows trust store from curl 7.71 onward;
+    // Schannel already uses it. Explicit private bundles keep their own policy.
+    if (windows() && client.TLSClientConfig.RootCAFile == "" && extern.curl_version_info(0).number >= 476928) {
+        if (!setLong(easy, optSSLOptions, 16) || extern.curl_easy_setopt(easy, optCAInfo, zero(*void)) != 0)
+            return Result<Response>.error("http: native root CA setup failed");
+    }
     if (client.TLSClientConfig.RootCAFile != "" && extern.curl_easy_setopt(easy, optCAInfo, ca.data) != 0)
         return Result<Response>.error("http: root CA setup failed");
     multi := extern.curl_multi_init();
