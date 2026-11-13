@@ -1,0 +1,220 @@
+package http;
+import "io";
+
+// A small blocking HTTP/1.1 client for POSIX hosts; TLS is not implemented.
+extern i32 getaddrinfo(buffer<i8> host, buffer<i8> service, *Address hints, *void result);
+extern void freeaddrinfo(*Address result);
+extern i32 socket(i32 family, i32 kind, i32 protocol);
+extern i32 connect(i32 fd, *void address, u32 size);
+extern int send(i32 fd, buffer<i8> data, uint size, i32 flags);
+extern int recv(i32 fd, buffer<i8> data, uint size, i32 flags);
+extern i32 close(i32 fd);
+struct Address { flags i32; family i32; kind i32; protocol i32; size u32; address *void; canon *void; next *void; }
+struct Header { values map[string]string[]; }
+func lower(s string) string {
+    bytes := s -> i8[];
+    for (i := 0; i < len(bytes); i++) { if (bytes[i] >= 'A' && bytes[i] <= 'Z') bytes[i] += 32; }
+    return bytes -> string;
+}
+func trim(s string) string {
+    a := 0; b := len(s);
+    for (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
+    for (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t')) b--;
+    return s[a:b];
+}
+func index(s string, needle string) int {
+    for (i := 0; i <= len(s) - len(needle); i++) { if (s[i:i + len(needle)] == needle) return i; }
+    return -1;
+}
+func (h *Header) Set(key string, value string) { h.values[lower(key)] = string[]{value}; }
+func (h *Header) Add(key string, value string) {
+    k := lower(key); values, ok := h.values[k];
+    if (!ok) values = string[]{};
+    values.append(value); h.values[k] = values;
+}
+func (h Header) Get(key string) string {
+    values, ok := h.values[lower(key)];
+    if (!ok || len(values) == 0) return "";
+    return values[0];
+}
+func (h Header) Values(key string) string[] {
+    values, ok := h.values[lower(key)];
+    if (!ok) return string[]{};
+    return values;
+}
+func (h *Header) Del(key string) { delete(h.values, lower(key)); }
+struct Request { Method string; URL string; Header Header; Body string; }
+struct Response { Status string; StatusCode int; Header Header; Body string; }
+struct Client { MaxResponseBytes int; }
+func token(text string) bool {
+    if (len(text) == 0) return false;
+    for (_, c := range text) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || index("!#$%&'*+-.^_`|~", i8[]{c} -> string) >= 0)) return false;
+    }
+    return true;
+}
+func safeValue(text string) bool {
+    for (_, c := range text) { if (((c -> u8) < 32 && c != '\t') || (c -> u8) == 127) return false; }
+    return true;
+}
+struct target { host string; port string; path string; authority string; }
+func parseURL(url string) Result<target> {
+    if (len(url) < 7 || url[:7] != "http://") return Result<target>.error("http: only http:// URLs are supported");
+    rest := url[7:]; end := len(rest);
+    for (i, c := range rest) { if (c == '/' || c == '?' || c == '#') { end = i; break; } }
+    authority := rest[:end]; host := authority; port := "80";
+    colon := index(authority, ":");
+    if (colon >= 0) { host = authority[:colon]; port = authority[colon + 1:]; }
+    if (len(host) == 0 || index(host, "@") >= 0 || index(host, "[") >= 0) return Result<target>.error("http: invalid or unsupported host");
+    for (_, c := range host) { if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-')) return Result<target>.error("http: invalid host"); }
+    n := decimal(port);
+    if (n.hasError()) return Result<target>.error("http: invalid port");
+    number := n.unwrap();
+    if (number < 1 || number > 65535) return Result<target>.error("http: invalid port");
+    path := rest[end:]; fragment := index(path, "#"); if (fragment >= 0) path = path[:fragment];
+    if (len(path) == 0 || path[0] == '?') path = "/" + path;
+    for (_, c := range path) { if ((c -> u8) <= 32 || (c -> u8) == 127) return Result<target>.error("http: URL requires escaping"); }
+    return Result<target>.value(target{host, port, path, authority});
+}
+func NewRequest(method string, url string, body string) Result<Request> {
+    if (method == "") method = "GET";
+    if (!token(method)) return Result<Request>.error("http: invalid method");
+    parsed := parseURL(url); if (parsed.hasError()) return Result<Request>.error(parsed.error());
+    h: Header; return Result<Request>.value(Request{method, url, h, body});
+}
+func Get(url string) Result<Response> { client: Client; return client.Get(url); }
+func Post(url string, contentType string, body string) Result<Response> { client: Client; return client.Post(url, contentType, body); }
+func (c Client) Get(url string) Result<Response> {
+    r := NewRequest("GET", url, ""); if (r.hasError()) return Result<Response>.error(r.error());
+    return c.Do(r.unwrap());
+}
+func (c Client) Post(url string, contentType string, body string) Result<Response> {
+    r := NewRequest("POST", url, body); if (r.hasError()) return Result<Response>.error(r.error());
+    request := r.unwrap(); request.Header.Set("Content-Type", contentType); return c.Do(request);
+}
+func (c Client) Do(request Request) Result<Response> {
+    if (!token(request.Method)) return Result<Response>.error("http: invalid method");
+    parsed := parseURL(request.URL); if (parsed.hasError()) return Result<Response>.error(parsed.error());
+    t := parsed.unwrap();
+    wire := request.Method + " " + t.path + " HTTP/1.1\r\nHost: " + t.authority + "\r\nConnection: close\r\nContent-Length: " + io.Sprint(len(request.Body)) + "\r\n";
+    for (key, values := range request.Header.values) {
+        if (!token(key)) return Result<Response>.error("http: invalid header name");
+        if (key == "host" || key == "connection" || key == "content-length" || key == "transfer-encoding") return Result<Response>.error("http: reserved framing header");
+        for (_, value := range values) {
+            if (!safeValue(value)) return Result<Response>.error("http: invalid header value");
+            wire += key + ": " + value + "\r\n";
+        }
+    }
+    wire += "\r\n" + request.Body;
+    hints: Address; hints.kind = 1;
+    addresses: *Address = null;
+    host := (t.host + "\0") -> i8[]; port := (t.port + "\0") -> i8[];
+    if (extern.getaddrinfo(host.data, port.data, &hints, (&addresses) -> (*void)) != 0) return Result<Response>.error("http: host lookup failed");
+    defer extern.freeaddrinfo(addresses);
+    fd: i32 = -1; current := addresses;
+    for ((current -> int) != 0) {
+        fd = extern.socket(current.family, current.kind, current.protocol);
+        if (fd >= 0) {
+            if (extern.connect(fd, current.address, current.size) == 0) break;
+            extern.close(fd); fd = -1;
+        }
+        current = current.next -> (*Address);
+    }
+    if (fd < 0) return Result<Response>.error("http: connection failed");
+    defer extern.close(fd);
+    bytes := wire -> i8[]; sent := 0;
+    for (sent < len(bytes)) {
+        part := bytes[sent:]; n := extern.send(fd, part.data, len(part) -> uint, 16384);
+        if (n <= 0) return Result<Response>.error("http: send failed");
+        sent += n;
+    }
+    limit := c.MaxResponseBytes > 0 ? c.MaxResponseBytes : 16777216;
+    output := i8[]{}; chunk: i8[4096];
+    for (;;) {
+        n := extern.recv(fd, chunk.data, 4096, 0);
+        if (n < 0) return Result<Response>.error("http: receive failed");
+        if (n == 0) break;
+        if (n > limit - len(output)) return Result<Response>.error("http: response exceeds size limit");
+        output.append(chunk[:n]...);
+    }
+    return parseResponse(output -> string, request.Method == "HEAD");
+}
+func decimal(text string) Result<int> {
+    if (len(text) == 0) return Result<int>.error("http: empty length");
+    for (_, c := range text) { if (c < '0' || c > '9') return Result<int>.error("http: invalid length"); }
+    return io.ParseInt(text);
+}
+func unchunk(text string) Result<string> {
+    out := ""; pos := 0;
+    for (;;) {
+        lineEnd := index(text[pos:], "\r\n");
+        if (lineEnd < 0) return Result<string>.error("http: truncated chunk size");
+        line := text[pos:pos + lineEnd]; pos += lineEnd + 2;
+        semi := index(line, ";"); if (semi >= 0) line = line[:semi];
+        if (len(line) == 0) return Result<string>.error("http: invalid chunk size");
+        size := 0;
+        for (_, c := range lower(line)) {
+            n := index("0123456789abcdef", i8[]{c} -> string);
+            if (n < 0 || size > (len(text) - n) / 16) return Result<string>.error("http: invalid chunk size");
+            size = size * 16 + n;
+        }
+        if (size == 0) {
+            // Validate the terminating trailer section, including its final CRLF.
+            for (;;) {
+                end := index(text[pos:], "\r\n");
+                if (end < 0) return Result<string>.error("http: truncated trailers");
+                line = text[pos:pos + end]; pos += end + 2;
+                if (line == "") {
+                    if (pos != len(text)) return Result<string>.error("http: trailing response data");
+                    return Result<string>.value(out);
+                }
+                colon := index(line, ":");
+                if (colon <= 0 || !token(line[:colon]) || !safeValue(line[colon + 1:])) return Result<string>.error("http: invalid trailer");
+            }
+        }
+        if (size > len(text) - pos || len(text) - pos - size < 2) return Result<string>.error("http: truncated chunk");
+        out += text[pos:pos + size]; pos += size;
+        if (text[pos:pos + 2] != "\r\n") return Result<string>.error("http: missing chunk terminator");
+        pos += 2;
+    }
+}
+func parseResponse(text string, head bool) Result<Response> { return responseDepth(text, head, 0); }
+func responseDepth(text string, head bool, depth int) Result<Response> {
+    if (depth > 16) return Result<Response>.error("http: too many informational responses");
+    end := index(text, "\r\n\r\n");
+    if (end < 0 || end > 65536) return Result<Response>.error("http: invalid response headers");
+    lineEnd := index(text, "\r\n");
+    line := text[:lineEnd];
+    if (len(line) < 12 || (line[:9] != "HTTP/1.1 " && line[:9] != "HTTP/1.0 ")) return Result<Response>.error("http: invalid status line");
+    if (len(line) > 12 && line[12] != ' ') return Result<Response>.error("http: invalid status line");
+    parsed := decimal(line[9:12]); if (parsed.hasError()) return Result<Response>.error(parsed.error());
+    code := parsed.unwrap(); if (code < 100 || code > 599) return Result<Response>.error("http: invalid status code");
+    h: Header; pos := lineEnd + 2;
+    for (pos < end) {
+        next := index(text[pos:], "\r\n");
+        entry := text[pos:pos + next]; pos += next + 2;
+        colon := index(entry, ":");
+        if (colon <= 0 || !token(entry[:colon]) || !safeValue(entry[colon + 1:])) return Result<Response>.error("http: invalid response header");
+        key := lower(entry[:colon]); value := trim(entry[colon + 1:]);
+        if (key == "content-length" && h.Get(key) != "" && h.Get(key) != value) return Result<Response>.error("http: conflicting lengths");
+        h.Add(key, value);
+    }
+    body := text[end + 4:];
+    if (code >= 100 && code < 200) {
+        if (code == 101) return Result<Response>.error("http: protocol upgrades unsupported");
+        return responseDepth(body, head, depth + 1);
+    }
+    if (head || code == 204 || code == 304) body = "";
+    else {
+        transfer := lower(h.Get("Transfer-Encoding")); length := h.Get("Content-Length");
+        if (transfer != "") {
+            if (transfer != "chunked" || length != "") return Result<Response>.error("http: unsupported or conflicting transfer encoding");
+            decoded := unchunk(body); if (decoded.hasError()) return Result<Response>.error(decoded.error());
+            body = decoded.unwrap();
+        } else if (length != "") {
+            n := decimal(length); if (n.hasError()) return Result<Response>.error(n.error());
+            if (n.unwrap() != len(body)) return Result<Response>.error("http: body length mismatch");
+        }
+    }
+    return Result<Response>.value(Response{line[9:], code, h, body});
+}

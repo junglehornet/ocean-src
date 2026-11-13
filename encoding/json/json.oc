@@ -1,0 +1,276 @@
+package json;
+import "io";
+import "reflect";
+
+
+// Numbers preserve their source spelling when decoded and re-encoded.
+struct Number { Text string; }
+func (n Number) Int64() Result<int> { return io.ParseInt(n.Text); }
+func (n Number) Float64() Result<float> { return io.ParseFloat(n.Text); }
+func quote(text string) string {
+    out := "\"";
+    hex := "0123456789abcdef";
+    for (_, c := range text) {
+        b := (c -> u8) -> int;
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (b < 32) out += "\\u00" + hex[b / 16:b / 16 + 1] + hex[b % 16:b % 16 + 1];
+        else out += (i8[]{c} -> string);
+    }
+    return out + "\"";
+}
+func Marshal(value any) Result<string> { return encode(value, 0); }
+func encode(value any, depth int) Result<string> {
+    if (depth > 128) return Result<string>.error("json: maximum nesting exceeded");
+    if (value == null) return Result<string>.value("null");
+    switch (value.(type)) {
+        case string:
+            text := value.(string);
+            if (!validUTF8(text)) return Result<string>.error("json: invalid UTF-8");
+            return Result<string>.value(quote(text));
+        case bool: return Result<string>.value(value.(bool) ? "true" : "false");
+        case int: return Result<string>.value(io.Sprint(value.(int)));
+        case uint: return Result<string>.value(io.Sprint(value.(uint)));
+        case float:
+            text := io.FormatFloat(value.(float));
+            if (!Valid(text)) return Result<string>.error("json: non-finite float");
+            return Result<string>.value(text);
+        case f32: return encode(value.(f32) -> float, depth);
+        case i32: return encode(value.(i32) -> int, depth);
+        case i16: return encode(value.(i16) -> int, depth);
+        case i8: return encode(value.(i8) -> int, depth);
+        case u32: return encode(value.(u32) -> uint, depth);
+        case u16: return encode(value.(u16) -> uint, depth);
+        case u8: return encode(value.(u8) -> uint, depth);
+        case Number:
+            text := value.(Number).Text;
+            parsed := Unmarshal(text);
+            if (parsed.hasError()) return Result<string>.error("json: invalid Number");
+            v := parsed.unwrap();
+            switch (v.(type)) {
+                case float:
+            text := io.FormatFloat(value.(float));
+            if (!Valid(text)) return Result<string>.error("json: non-finite float");
+            return Result<string>.value(text);
+        case f32: return encode(value.(f32) -> float, depth);
+        case i32: return encode(value.(i32) -> int, depth);
+        case i16: return encode(value.(i16) -> int, depth);
+        case i8: return encode(value.(i8) -> int, depth);
+        case u32: return encode(value.(u32) -> uint, depth);
+        case u16: return encode(value.(u16) -> uint, depth);
+        case u8: return encode(value.(u8) -> uint, depth);
+        case Number:
+                    if (v.(Number).Text != text) return Result<string>.error("json: invalid Number");
+                    return Result<string>.value(text);
+                default: return Result<string>.error("json: invalid Number");
+            }
+        case string[]:
+            items := value.(string[]); return encodeArray<string>(items.array(), depth);
+        case int[]:
+            items := value.(int[]); return encodeArray<int>(items.array(), depth);
+        case float[]:
+            items := value.(float[]); return encodeArray<float>(items.array(), depth);
+        case bool[]:
+            items := value.(bool[]); return encodeArray<bool>(items.array(), depth);
+        case mixed any[]:
+            out := "[";
+            for (i, item := range value.(mixed any[])) {
+                encoded := encode(item, depth + 1);
+                if (encoded.hasError()) return encoded;
+                out += (i == 0 ? "" : ",") + encoded.unwrap();
+            }
+            return Result<string>.value(out + "]");
+        case map[string]any:
+            out := "{";
+            first := true;
+            obj := value.(map[string]any); keys := string[]{};
+            for (key := range obj) keys.append(key);
+            for (i := 1; i < len(keys); i++) {
+                for (j := i; j > 0 && keys[j] < keys[j - 1]; j--) {
+                    tmp := keys[j]; keys[j] = keys[j - 1]; keys[j - 1] = tmp;
+                }
+            }
+            for (_, key := range keys) {
+                if (!validUTF8(key)) return Result<string>.error("json: invalid UTF-8 key");
+                encoded := encode(obj[key], depth + 1);
+                if (encoded.hasError()) return encoded;
+                out += (first ? "" : ",") + quote(key) + ":" + encoded.unwrap();
+                first = false;
+            }
+            return Result<string>.value(out + "}");
+        default:
+            if (reflect.IsStruct(value)) {
+                out := "{";
+                for (i, field := range reflect.Fields(value)) {
+                    encoded := encode(field.Value, depth + 1);
+                    if (encoded.hasError()) return encoded;
+                    out += (i == 0 ? "" : ",") + quote(field.Name) + ":" + encoded.unwrap();
+                }
+                return Result<string>.value(out + "}");
+            }
+            return Result<string>.error("json: unsupported type");
+    }
+}
+struct parser { text string; pos int; }
+func (p *parser) space() {
+    for (p.pos < len(p.text) && (p.text[p.pos] == ' ' || p.text[p.pos] == '\n' || p.text[p.pos] == '\r' || p.text[p.pos] == '\t')) p.pos++;
+}
+func (p *parser) take(c i8) bool {
+    if (p.pos < len(p.text) && p.text[p.pos] == c) { p.pos++; return true; }
+    return false;
+}
+func utf8(code int) string {
+    b := i8[]{};
+    if (code < 128) b.append(code -> i8);
+    else if (code < 2048) { b.append((192 | (code >> 6)) -> i8); b.append((128 | (code & 63)) -> i8); }
+    else if (code < 65536) {
+        b.append((224 | (code >> 12)) -> i8); b.append((128 | ((code >> 6) & 63)) -> i8); b.append((128 | (code & 63)) -> i8);
+    } else {
+        b.append((240 | (code >> 18)) -> i8); b.append((128 | ((code >> 12) & 63)) -> i8);
+        b.append((128 | ((code >> 6) & 63)) -> i8); b.append((128 | (code & 63)) -> i8);
+    }
+    return b -> string;
+}
+func (p *parser) hex4() Result<int> {
+    code := 0;
+    for (i := 0; i < 4; i++) {
+        if (p.pos >= len(p.text)) return Result<int>.error("json: truncated unicode escape");
+        c := p.text[p.pos]; p.pos++;
+        n := -1;
+        if (c >= '0' && c <= '9') n = c - '0';
+        else if (c >= 'a' && c <= 'f') n = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') n = c - 'A' + 10;
+        if (n < 0) return Result<int>.error("json: invalid unicode escape");
+        code = code * 16 + n;
+    }
+    return Result<int>.value(code);
+}
+func (p *parser) stringValue() Result<string> {
+    if (!p.take('"')) return Result<string>.error("json: expected string");
+    out := "";
+    for (p.pos < len(p.text)) {
+        c := p.text[p.pos]; p.pos++;
+        if (c == '"') return Result<string>.value(out);
+        if ((c -> u8) < 32) return Result<string>.error("json: control character in string");
+        if (c != '\\') { out += (i8[]{c} -> string); continue; }
+        if (p.pos == len(p.text)) break;
+        c = p.text[p.pos]; p.pos++;
+        switch (c) {
+            case '"': out += "\"";
+            case '\\': out += "\\";
+            case '/': out += "/";
+            case 'b': out += (i8[]{8} -> string);
+            case 'f': out += (i8[]{12} -> string);
+            case 'n': out += "\n";
+            case 'r': out += "\r";
+            case 't': out += "\t";
+            case 'u':
+                r := p.hex4(); if (r.hasError()) return Result<string>.error(r.error());
+                code := r.unwrap();
+                if (code >= 55296 && code <= 56319) {
+                    if (!p.take('\\') || !p.take('u')) return Result<string>.error("json: missing low surrogate");
+                    low := p.hex4(); if (low.hasError()) return Result<string>.error(low.error());
+                    n := low.unwrap();
+                    if (n < 56320 || n > 57343) return Result<string>.error("json: invalid low surrogate");
+                    code = 65536 + (code - 55296) * 1024 + n - 56320;
+                } else if (code >= 56320 && code <= 57343) return Result<string>.error("json: unexpected low surrogate");
+                out += utf8(code);
+            default: return Result<string>.error("json: invalid escape");
+        }
+    }
+    return Result<string>.error("json: unterminated string");
+}
+func (p *parser) digit() bool { return p.pos < len(p.text) && p.text[p.pos] >= '0' && p.text[p.pos] <= '9'; }
+func (p *parser) value(depth int) Result<any> {
+    if (depth > 128) return Result<any>.error("json: maximum nesting exceeded");
+    p.space();
+    if (p.pos == len(p.text)) return Result<any>.error("json: expected value");
+    c := p.text[p.pos];
+    if (c == '"') {
+        r := p.stringValue(); if (r.hasError()) return Result<any>.error(r.error());
+        return Result<any>.value(r.unwrap());
+    }
+    if (p.take('{')) {
+        obj := make(map[string]any); p.space();
+        if (p.take('}')) return Result<any>.value(obj);
+        for (;;) {
+            p.space(); key := p.stringValue(); if (key.hasError()) return Result<any>.error(key.error());
+            p.space(); if (!p.take(':')) return Result<any>.error("json: expected colon");
+            r := p.value(depth + 1); if (r.hasError()) return r;
+            obj[key.unwrap()] = r.unwrap(); p.space();
+            if (p.take('}')) break;
+            if (!p.take(',')) return Result<any>.error("json: expected comma");
+        }
+        return Result<any>.value(obj);
+    }
+    if (p.take('[')) {
+        items: mixed any[] = {}; p.space();
+        if (p.take(']')) return Result<any>.value(items);
+        for (;;) {
+            r := p.value(depth + 1); if (r.hasError()) return r;
+            item := r.unwrap(); items.append(item); p.space();
+            if (p.take(']')) break;
+            if (!p.take(',')) return Result<any>.error("json: expected comma");
+        }
+        return Result<any>.value(items);
+    }
+    if (len(p.text) - p.pos >= 4) {
+        word := p.text[p.pos:p.pos + 4];
+        if (word == "null") { p.pos += 4; return Result<any>.value(null); }
+        if (word == "true") { p.pos += 4; return Result<any>.value(true); }
+    }
+    if (len(p.text) - p.pos >= 5 && p.text[p.pos:p.pos + 5] == "false") { p.pos += 5; return Result<any>.value(false); }
+    start := p.pos; p.take('-');
+    if (!p.take('0')) {
+        if (!p.digit()) return Result<any>.error("json: invalid number");
+        for (p.digit()) p.pos++;
+    }
+    if (p.take('.')) {
+        if (!p.digit()) return Result<any>.error("json: invalid fraction");
+        for (p.digit()) p.pos++;
+    }
+    if (p.take('e') || p.take('E')) {
+        if (!p.take('+')) p.take('-');
+        if (!p.digit()) return Result<any>.error("json: invalid exponent");
+        for (p.digit()) p.pos++;
+    }
+    return Result<any>.value(Number{p.text[start:p.pos]});
+}
+func Unmarshal(text string) Result<any> {
+    if (!validUTF8(text)) return Result<any>.error("json: invalid UTF-8");
+    p := parser{text, 0}; r := p.value(0);
+    if (r.hasError()) return r;
+    p.space();
+    if (p.pos != len(text)) return Result<any>.error("json: trailing data");
+    return r;
+}
+func Valid(text string) bool { return !Unmarshal(text).hasError(); }
+
+func encodeArray<T>(items array<T>, depth int) Result<string> {
+    out := "[";
+    for (i, item := range items) {
+        r := encode(item, depth + 1); if (r.hasError()) return r;
+        out += (i == 0 ? "" : ",") + r.unwrap();
+    }
+    return Result<string>.value(out + "]");
+}
+func validUTF8(text string) bool {
+    for (i := 0; i < len(text);) {
+        first := (text[i] -> u8) -> int;
+        width := 1; code := first;
+        if (first >= 192 && first < 224) { width = 2; code = first & 31; }
+        else if (first >= 224 && first < 240) { width = 3; code = first & 15; }
+        else if (first >= 240 && first < 248) { width = 4; code = first & 7; }
+        else if (first >= 128) return false;
+        if (width > len(text) - i) return false;
+        for (j := 1; j < width; j++) {
+            b := (text[i + j] -> u8) -> int;
+            if (b < 128 || b > 191) return false;
+            code = (code << 6) | (b & 63);
+        }
+        if ((width == 2 && code < 128) || (width == 3 && code < 2048) ||
+            (width == 4 && code < 65536) || code > 1114111 || (code >= 55296 && code <= 57343)) return false;
+        i += width;
+    }
+    return true;
+}

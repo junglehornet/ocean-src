@@ -1,0 +1,52 @@
+package json;
+import "testing";
+import "math";
+
+struct person { Name string; Age int; }
+func TestMarshal(t *testing.T) {
+    if (Marshal(person{"Ada", 36}).unwrap() != "{\"Name\":\"Ada\",\"Age\":36}") t.Fatal("struct encoding");
+    if (Marshal("a\n\"\\").unwrap() != "\"a\\u000a\\\"\\\\\"") t.Fatal("escaping");
+    if (Marshal(null).unwrap() != "null" || Marshal(true).unwrap() != "true") t.Fatal("scalars");
+    if (Marshal(1.2345678901234567).unwrap() != "1.2345678901234567") t.Fatal("float precision");
+    if (!Marshal(math.NaN()).hasError()) t.Fatal("NaN accepted");
+    if (!Marshal(Number{"true"}).hasError() || !Marshal(Number{"01"}).hasError() || !Marshal(Number{" 1"}).hasError()) t.Fatal("invalid Number accepted");
+}
+func TestUnmarshal(t *testing.T) {
+    value := Unmarshal(" {\"items\":[1,\"two\",true,null],\"x\":1,\"x\":2} ").unwrap();
+    obj := value.(map[string]any);
+    items := obj["items"].(mixed any[]);
+    if (len(items) != 4 || items[0].(Number).Int64().unwrap() != 1 || items[1].(string) != "two" || !items[2].(bool) || items[3] != null) t.Fatal("heterogeneous array");
+    if (obj["x"].(Number).Text != "2") t.Fatal("duplicate keys must use last value");
+    encoded := Marshal(value).unwrap();
+    if (!Valid(encoded)) t.Fatal("round trip");
+    if (Unmarshal("\"\\uD83D\\uDE00\"").unwrap().(string) != "😀") t.Fatal("surrogate pair");
+    if (Unmarshal("-12.5e+2").unwrap().(Number).Float64().unwrap() != -1250) t.Fatal("number parsing");
+    if (Unmarshal("18446744073709551615").unwrap().(Number).Text != "18446744073709551615") t.Fatal("number precision");
+}
+func TestInvalid(t *testing.T) {
+    cases := string[]{"", " ", "[1,]", "{\"a\":}", "{a:1}", "true false", "01", "-", "1.", "1e", "+1", "NaN", "\"\\x\"", "\"\\uD800\"", "\"\\uDC00\"", "\"\\uZZZZ\"", "\"a\n\"", "[", "{", "\""};
+    for (_, text := range cases) { if (Valid(text)) t.Fatalf("accepted invalid JSON: {}", text); }
+    nested := "";
+    for (i := 0; i < 130; i++) nested += "[";
+    nested += "0";
+    for (i := 0; i < 130; i++) nested += "]";
+    if (Valid(nested)) t.Fatal("nesting limit");
+}
+func TestArraysAndNumbers(t *testing.T) {
+    if (Marshal(int[]{1, 2}).unwrap() != "[1,2]" || Marshal(string[]{"a", "b"}).unwrap() != "[\"a\",\"b\"]") t.Fatal("typed arrays");
+    if (Marshal(bool[]{true, false}).unwrap() != "[true,false]" || !Valid(Marshal(float[]{0.1, -2.5}).unwrap())) t.Fatal("typed scalar arrays");
+    values: mixed any[] = {1, "two", false};
+    if (Marshal(values).unwrap() != "[1,\"two\",false]") t.Fatal("mixed array encoding");
+    obj := map[string]any{"z": 2, "a": 1};
+    if (Marshal(obj).unwrap() != "{\"a\":1,\"z\":2}") t.Fatal("sorted keys");
+    if (!Marshal(math.Inf(1)).hasError() || !Marshal(math.Inf(-1)).hasError()) t.Fatal("infinity");
+    n := Number{"9223372036854775808"}; if (!n.Int64().hasError()) t.Fatal("integer overflow");
+    if (Marshal((7 -> i32)).unwrap() != "7" || Marshal((255 -> u8)).unwrap() != "255") t.Fatal("integer widths");
+}
+func TestUTF8AndEscapes(t *testing.T) {
+    if (Unmarshal("\"\\b\\f\\n\\r\\t\\/\\\\\\\"\"").unwrap().(string) != (i8[]{8, 12, 10, 13, 9, 47, 92, 34} -> string)) t.Fatal("escape decoding");
+    if (Unmarshal("\"\\u0061\\u20ac\"").unwrap().(string) != "a€") t.Fatal("unicode escape decoding");
+    if (Marshal("Ocean 🌊").unwrap() != "\"Ocean 🌊\"") t.Fatal("UTF-8 encoding");
+    invalid := i8[]{-64, -128} -> string;
+    if (!Marshal(invalid).hasError() || Valid("\"" + invalid + "\"")) t.Fatal("invalid UTF-8 accepted");
+}

@@ -1,0 +1,144 @@
+package exec;
+
+// POSIX process execution. Arguments are passed directly, never through a shell.
+extern i32 posix_spawnp(*i32 pid, buffer<i8> path, *void actions, *void attr, *void argv, *void env);
+extern i32 posix_spawn_file_actions_init(*void actions);
+extern i32 posix_spawn_file_actions_destroy(*void actions);
+extern i32 posix_spawn_file_actions_adddup2(*void actions, i32 fd, i32 target);
+extern i32 posix_spawn_file_actions_addchdir_np(*void actions, buffer<i8> path);
+extern *i32 __errno_location();
+extern i32 ferror(*void file);
+extern *void opendir(buffer<i8> path);
+extern i32 closedir(*void directory);
+extern i32 access(buffer<i8> path, i32 mode);
+extern buffer<i8> getenv(buffer<i8> name);
+extern i32 waitpid(i32 pid, *i32 status, i32 options);
+extern *void tmpfile();
+extern i32 fileno(*void file);
+extern i32 fclose(*void file);
+extern void rewind(*void file);
+extern uint fread(buffer<i8> bytes, uint size, uint count, *void file);
+func environment() *void {
+    result: *void = null;
+    asm x86_64/linux {
+        mov rax, qword ptr [rip + environ@GOTPCREL]
+        mov rax, qword ptr [rax]
+        mov qword ptr ${result}, rax
+    }
+    return result;
+}
+
+struct Cmd { Path string; Args string[]; Dir string; Env string[]; ExitCode int; used bool; }
+func Command(name string, args ...string) Cmd { c: Cmd; c.Path = name; c.Args = args; c.ExitCode = -1; return c; }
+func clean(text string) bool {
+    for (_, c := range text) { if (c == 0) return false; }
+    return true;
+}
+func (c *Cmd) execute(capture bool, combined bool) Result<string> {
+    if (c.used) return Result<string>.error("exec: command already started");
+    c.used = true;
+    if (c.Path == "" || !clean(c.Path)) return Result<string>.error("exec: invalid executable");
+    strings := string[]{c.Path + "\0"};
+    for (_, arg := range c.Args) {
+        if (!clean(arg)) return Result<string>.error("exec: argument contains NUL");
+        strings.append(arg + "\0");
+    }
+    argv := make(int[]);
+    // Keep the owning byte arrays alive through spawn.
+    storage := make(i8[][]);
+    for (_, text := range strings) { storage.append(text -> i8[]); }
+    for (i := 0; i < len(storage); i++) { argv.append(storage[i].data -> int); }
+    argv.append(0);
+    actions: int[64];
+    if (extern.posix_spawn_file_actions_init((&actions) -> (*void)) != 0)
+        return Result<string>.error("exec: cannot initialize spawn actions");
+    defer extern.posix_spawn_file_actions_destroy((&actions) -> (*void));
+    file: *void = null;
+    if (capture) {
+        file = extern.tmpfile();
+        if ((file -> int) == 0) return Result<string>.error("exec: cannot create output file");
+        defer extern.fclose(file);
+        fd := extern.fileno(file);
+        if (extern.posix_spawn_file_actions_adddup2((&actions) -> (*void), fd, 1) != 0)
+            return Result<string>.error("exec: cannot redirect stdout");
+        if (combined && extern.posix_spawn_file_actions_adddup2((&actions) -> (*void), fd, 2) != 0)
+            return Result<string>.error("exec: cannot redirect stderr");
+    }
+    directory := (c.Dir + "\0") -> i8[];
+    if (!clean(c.Dir)) return Result<string>.error("exec: directory contains NUL");
+    if (c.Dir != "" && extern.posix_spawn_file_actions_addchdir_np((&actions) -> (*void), directory.data) != 0)
+        return Result<string>.error("exec: cannot set working directory");
+    envStorage := make(i8[][]); envPointers := make(int[]);
+    for (_, entry := range c.Env) {
+        if (!clean(entry)) return Result<string>.error("exec: environment contains NUL");
+        envStorage.append((entry + "\0") -> i8[]);
+    }
+    for (i := 0; i < len(envStorage); i++) envPointers.append(envStorage[i].data -> int);
+    envPointers.append(0);
+    env := environment();
+    if (len(c.Env) > 0) env = envPointers.data -> (*void);
+    pid: i32;
+    path := (c.Path + "\0") -> i8[];
+    if (extern.posix_spawnp(&pid, path.data, (&actions) -> (*void), zero(*void), argv.data -> (*void), env) != 0)
+        return Result<string>.error("exec: executable could not be started");
+    status: i32;
+    for (extern.waitpid(pid, &status, 0) < 0) {
+        if (*extern.__errno_location() != 4) return Result<string>.error("exec: wait failed");
+    }
+    c.ExitCode = (status & 127) == 0 ? ((status >> 8) & 255) -> int : -1;
+    output := i8[]{};
+    if (capture) {
+        extern.rewind(file);
+        bytes: i8[4096];
+        for (;;) {
+            n := extern.fread(bytes.data, 1, 4096, file) -> int;
+            if (n == 0) break;
+            output.append(bytes[:n]...);
+        }
+        if (extern.ferror(file) != 0) return Result<string>.error("exec: output read failed");
+    }
+    if (c.ExitCode != 0) return Result<string>.error("exec: process exited unsuccessfully");
+    return Result<string>.value(output -> string);
+}
+func (c *Cmd) Run() Result<int> {
+    result := c.execute(false, false);
+    if (result.hasError()) return Result<int>.error(result.error());
+    return Result<int>.value(c.ExitCode);
+}
+func (c *Cmd) Output() Result<string> { return c.execute(true, false); }
+func (c *Cmd) CombinedOutput() Result<string> { return c.execute(true, true); }
+
+// LookPath searches PATH and requires an executable file. As in Go, a relative
+// PATH result is rejected; use an explicit path to run from the current directory.
+func LookPath(name string) Result<string> {
+    if (name == "" || !clean(name)) return Result<string>.error("exec: invalid executable");
+    slash := false;
+    for (_, c := range name) { if (c == '/') slash = true; }
+    if (slash) {
+        bytes := (name + "\0") -> i8[];
+        if (executable(bytes)) return Result<string>.value(name);
+        return Result<string>.error("exec: executable not found");
+    }
+    pathName := "PATH\0" -> i8[];
+    raw := extern.getenv(pathName.data); text := i8[]{};
+    if ((raw -> int) != 0) { for (i := 0; raw[i] != 0; i++) text.append(raw[i]); }
+    path := text -> string; start := 0;
+    for (end := 0; end <= len(path); end++) {
+        if (end != len(path) && path[end] != ':') continue;
+        dir := path[start:end]; start = end + 1;
+        candidate := (dir == "" ? "." : dir) + "/" + name;
+        bytes := (candidate + "\0") -> i8[];
+        if (executable(bytes)) {
+            if (candidate[0] != '/') return Result<string>.error("exec: executable resolves relative to current directory");
+            return Result<string>.value(candidate);
+        }
+    }
+    return Result<string>.error("exec: executable not found in PATH");
+}
+
+func executable(path i8[]) bool {
+    if (extern.access(path.data, 1) != 0) return false;
+    directory := extern.opendir(path.data);
+    if ((directory -> int) != 0) { extern.closedir(directory); return false; }
+    return true;
+}

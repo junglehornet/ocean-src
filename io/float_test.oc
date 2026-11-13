@@ -1,0 +1,12 @@
+package io_test;
+import "io";
+import "testing";
+import "math";
+func TestFormatFloat(t *testing.T) {
+    values := float[]{0.0, -0.125, 1.2345678901234567, 1e-300, 1e300};
+    for (_, value := range values) {
+        if (io.ParseFloat(io.FormatFloat(value)).unwrap() != value) t.Fatal("float round trip");
+    }
+    if (!math.IsNaN(io.ParseFloat(io.FormatFloat(math.NaN())).unwrap())) t.Fatal("NaN formatting");
+    if (!math.IsInf(io.ParseFloat(io.FormatFloat(math.Inf(1))).unwrap(), 1)) t.Fatal("infinity formatting");
+}

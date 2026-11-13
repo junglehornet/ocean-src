@@ -1,0 +1,4 @@
+package io;
+
+// FormatFloat returns a locale-independent, round-trip decimal representation.
+func FormatFloat(value float) string { return sprintFloat(value, -1); }

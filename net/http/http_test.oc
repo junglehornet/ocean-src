@@ -1,0 +1,111 @@
+package http;
+import "testing";
+import "threads";
+import "io";
+extern i32 socket(i32 family, i32 kind, i32 protocol);
+extern i32 close(i32 fd);
+extern int send(i32 fd, buffer<i8> data, uint size, i32 flags);
+extern int recv(i32 fd, buffer<i8> data, uint size, i32 flags);
+extern i32 bind(i32 fd, *void address, u32 length);
+extern i32 listen(i32 fd, i32 backlog);
+extern i32 getsockname(i32 fd, *void address, *u32 length);
+extern i32 accept(i32 fd, *void address, *void length);
+func TestHeader(t *testing.T) {
+    h: Header; h.Set("Content-Type", "text/plain"); h.Add("CONTENT-TYPE", "application/json");
+    if (h.Get("content-type") != "text/plain") t.Fatal("case insensitive first value");
+    h.Set("CONTENT-TYPE", "text/html");
+    if (h.Get("Content-Type") != "text/html") t.Fatal("Set must replace");
+    copy := h; copy.Del("content-type");
+    if (copy.Get("Content-Type") != "" || h.Get("Content-Type") == "") t.Fatal("header value semantics");
+}
+func TestRequestValidation(t *testing.T) {
+    if (NewRequest("", "http://localhost?x=1#fragment", "").unwrap().Method != "GET") t.Fatal("default method");
+    cases := string[]{"https://example.com", "http://", "http://user@host", "http://host:0", "http://host:65536", "http://host/path with spaces", "http://host/\r\nX:yes"};
+    for (_, url := range cases) { if (!NewRequest("GET", url, "").hasError()) t.Fatalf("accepted {}", url); }
+    if (!NewRequest("GET\r\n", "http://localhost", "").hasError()) t.Fatal("method injection");
+}
+func TestResponseParsing(t *testing.T) {
+    r := parseResponse("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: yes\r\n\r\nhello", false).unwrap();
+    if (r.StatusCode != 200 || r.Status != "200 OK" || r.Body != "hello" || r.Header.Get("x-test") != "yes") t.Fatal("response fields");
+    r = parseResponse("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n2;ext=yes\r\nhi\r\n1\r\n!\r\n0\r\nX-End: yes\r\n\r\n", false).unwrap();
+    if (r.Body != "hi!" || r.StatusCode != 201) t.Fatal("chunked/informational response");
+    r = parseResponse("HTTP/1.0 404 Missing\r\n\r\nmissing", false).unwrap();
+    if (r.StatusCode != 404 || r.Body != "missing") t.Fatal("HTTP status is not a transport error");
+    if (parseResponse("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", true).unwrap().Body != "") t.Fatal("HEAD");
+}
+func TestMalformedResponses(t *testing.T) {
+    cases := string[]{"", "garbage\r\n\r\n", "HTTP/1.1 200 OK\r\nBad Header: yes\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhi", "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nhi", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx"};
+    for (_, wire := range cases) { if (!parseResponse(wire, false).hasError()) t.Fatalf("accepted malformed response {}", wire); }
+}
+func TestClient(t *testing.T) {
+    fd := extern.socket(2, 1, 0);
+    if (fd < 0) t.Fatal("create loopback socket");
+    defer extern.close(fd);
+    address: i8[16]; address[0] = 2; address[4] = 127; address[7] = 1;
+    if (extern.bind(fd, address.data -> (*void), 16) != 0 || extern.listen(fd, 1) != 0) t.Fatal("bind loopback socket");
+    length: u32 = 16;
+    if (extern.getsockname(fd, address.data -> (*void), &length) != 0) t.Fatal("getsockname");
+    port := ((address[2] -> u8) -> int) * 256 + ((address[3] -> u8) -> int);
+    received := "";
+    id := threads.Spawn(func() {
+        peer := extern.accept(fd, zero(*void), zero(*void));
+        if (peer < 0) return;
+        defer extern.close(peer);
+        buffer: i8[4096];
+        for (index(received, "\r\n\r\npayload") < 0) {
+            n := extern.recv(peer, buffer.data, 4096, 0);
+            if (n <= 0) return;
+            for (i := 0; i < n; i++) received += (i8[]{buffer[i]} -> string);
+        }
+        response := "HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nOK" -> i8[];
+        extern.send(peer, response.data, len(response) -> uint, 16384);
+    });
+    r := Post("http://127.0.0.1:" + io.Sprint(port) + "/upload?x=1", "text/plain", "payload");
+    threads.Await(id);
+    if (r.hasError()) t.Fatal(r.error());
+    response := r.unwrap();
+    if (response.StatusCode != 201 || response.Body != "OK") t.Fatal("client response");
+    if (index(received, "POST /upload?x=1 HTTP/1.1\r\n") != 0 || index(received, "content-type: text/plain\r\n") < 0 || index(received, "Content-Length: 7\r\n") < 0) t.Fatal("request serialization");
+}
+func TestPreflightErrors(t *testing.T) {
+    request := NewRequest("GET", "http://localhost", "").unwrap();
+    request.Header.Set("X-Test", "bad\r\nInjected: yes"); client: Client;
+    if (!client.Do(request).hasError()) t.Fatal("header injection");
+    request.Header.Del("X-Test"); request.Header.Set("Content-Length", "5");
+    if (!client.Do(request).hasError()) t.Fatal("framing override");
+    h: Header; h.Add("X", "first"); h.Add("x", "second");
+    if (len(h.Values("X")) != 2 || len(h.Values("missing")) != 0) t.Fatal("Values");
+    wire := "HTTP/1.1 200 OK\r\n\r\n";
+    for (i := 0; i < 18; i++) wire = "HTTP/1.1 100 Continue\r\n\r\n" + wire;
+    if (!parseResponse(wire, false).hasError()) t.Fatal("informational response limit");
+}
+func TestGetAndLimit(t *testing.T) {
+    fd := extern.socket(2, 1, 0); if (fd < 0) t.Fatal("socket");
+    defer extern.close(fd);
+    address: i8[16]; address[0] = 2; address[4] = 127; address[7] = 1;
+    if (extern.bind(fd, address.data -> (*void), 16) != 0 || extern.listen(fd, 3) != 0) t.Fatal("listen");
+    size: u32 = 16;
+    if (extern.getsockname(fd, address.data -> (*void), &size) != 0) t.Fatal("socket address");
+    port := ((address[2] -> u8) -> int) * 256 + ((address[3] -> u8) -> int);
+    id := threads.Spawn(func() {
+        for (i := 0; i < 3; i++) {
+            peer := extern.accept(fd, zero(*void), zero(*void)); if (peer < 0) return;
+            request := ""; bytes: i8[1024];
+            for (index(request, "\r\n\r\n") < 0) {
+                n := extern.recv(peer, bytes.data, 1024, 0); if (n <= 0) break;
+                request += bytes[:n] -> string;
+            }
+            response := "HTTP/1.1 404 Missing\r\nContent-Length: 4\r\n\r\nbody";
+            if (i == 2) response = "HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n";
+            data := response -> i8[]; extern.send(peer, data.data, len(data) -> uint, 16384); extern.close(peer);
+        }
+    });
+    url := "http://127.0.0.1:" + io.Sprint(port);
+    first := Get(url); client := Client{20}; limited := client.Get(url);
+    client.MaxResponseBytes = 4096; head := client.Do(NewRequest("HEAD", url, "").unwrap());
+    threads.Await(id);
+    if (first.hasError()) t.Fatal(first.error());
+    if (first.unwrap().StatusCode != 404 || first.unwrap().Body != "body") t.Fatal("GET status handling");
+    if (!limited.hasError()) t.Fatal("size limit");
+    if (head.hasError() || head.unwrap().Body != "") t.Fatal("HEAD request");
+}

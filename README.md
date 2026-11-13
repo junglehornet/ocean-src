@@ -269,3 +269,21 @@ logarithms, roots, rounding, and IEEE helpers without C extern functions.
 `math.Pow(x float, y float) float` accepts fractional exponents. Native assembly
 accelerates fractional powers on x86-64 and square roots on supported native
 architectures; portable Ocean routines cover the remaining paths.
+
+## HTTP, JSON, and processes
+
+- [`net/http`](net/http/README.md): Go-inspired blocking HTTP/1.1 client with
+  requests, responses, headers, chunked decoding, and response size limits.
+  This initial implementation supports plain HTTP on 64-bit Linux.
+- [`encoding/json`](encoding/json/README.md): JSON Marshal, Unmarshal, Valid,
+  precise Number values, heterogeneous arrays, objects, and struct encoding.
+- [`os/exec`](os/exec/README.md): Command, LookPath, Run, Output, and
+  CombinedOutput, with working-directory and environment configuration on
+  Linux x86-64.
+
+These packages use `Result<T>` for recoverable errors. See each package's README
+for its supported subset of the Go APIs. `io.FormatFloat(value float) string`
+provides locale-independent round-trip float formatting used by JSON.
+The matching compiler needs the interface-array, enum tuple boxing, field-name
+resolution, and boxed-array ownership fixes. Run `ocean test ./...` to run all
+standard-library tests; HTTP tests need loopback socket access.

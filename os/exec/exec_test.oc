@@ -1,0 +1,37 @@
+package exec;
+import "testing";
+func TestOutput(t *testing.T) {
+    c := Command("printf", "%s|%s", "a b", "$(echo injected)");
+    if (c.Output().unwrap() != "a b|$(echo injected)" || c.ExitCode != 0) t.Fatal("argument preservation");
+    if (!c.Run().hasError()) t.Fatal("command reused");
+}
+func TestCombinedOutput(t *testing.T) {
+    c := Command("/bin/sh", "-c", "printf out; printf err >&2");
+    if (c.CombinedOutput().unwrap() != "outerr") t.Fatal("combined streams");
+}
+func TestExitAndErrors(t *testing.T) {
+    c := Command("/bin/sh", "-c", "exit 7");
+    if (!c.Run().hasError() || c.ExitCode != 7) t.Fatal("exit status");
+    missing := Command("/definitely/no/executable");
+    if (!missing.Output().hasError()) t.Fatal("missing executable");
+    bad := Command("printf", "a\0b");
+    if (!bad.Run().hasError()) t.Fatal("NUL accepted");
+    ok := Command("/bin/true"); if (ok.Run().unwrap() != 0) t.Fatal("Run");
+}
+func TestLargeOutput(t *testing.T) {
+    c := Command("head", "-c", "160000", "/dev/zero");
+    if (len(c.Output().unwrap()) != 160000) t.Fatal("large output truncated or blocked");
+}
+func TestDirectoryAndEnvironment(t *testing.T) {
+    c := Command("/bin/sh", "-c", "printf '%s|' \"$OCEAN_EXEC_TEST\"; pwd");
+    c.Dir = "/tmp"; c.Env = string[]{"OCEAN_EXEC_TEST=custom"};
+    if (c.Output().unwrap() != "custom|/tmp\n") t.Fatal("directory/environment");
+    bad := Command("/bin/true"); bad.Dir = "/not/a/real/directory";
+    if (!bad.Run().hasError()) t.Fatal("invalid directory");
+    badEnv := Command("/bin/true"); badEnv.Env = string[]{"X=bad\0value"};
+    if (!badEnv.Run().hasError()) t.Fatal("invalid environment");
+}
+func TestLookPath(t *testing.T) {
+    if (LookPath("sh").hasError() || LookPath("/bin/sh").unwrap() != "/bin/sh") t.Fatal("lookup");
+    if (!LookPath("/tmp").hasError() || !LookPath("/definitely/not/here").hasError() || !LookPath("").hasError()) t.Fatal("lookup failure");
+}
