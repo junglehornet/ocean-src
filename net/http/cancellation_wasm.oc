@@ -1,0 +1,8 @@
+package http;
+// Keep Cancellation at a stable address. Never copy it after first use.
+// It is caller-owned and can cancel several requests; cancellation is permanent.
+struct Cancellation { canceled bool; }
+func (c *Cancellation) Cancel() { c.canceled = true; }
+func (c *Cancellation) Canceled() bool {
+    return c.canceled;
+}

@@ -1,15 +1,6 @@
 package http;
 import "io";
 
-// A small blocking HTTP/1.1 client for POSIX hosts; TLS is not implemented.
-extern i32 getaddrinfo(buffer<i8> host, buffer<i8> service, *Address hints, *void result);
-extern void freeaddrinfo(*Address result);
-extern i32 socket(i32 family, i32 kind, i32 protocol);
-extern i32 connect(i32 fd, *void address, u32 size);
-extern int send(i32 fd, buffer<i8> data, uint size, i32 flags);
-extern int recv(i32 fd, buffer<i8> data, uint size, i32 flags);
-extern i32 close(i32 fd);
-struct Address { flags i32; family i32; kind i32; protocol i32; size u32; address *void; canon *void; next *void; }
 struct Header { values map[string]string[]; }
 func lower(s string) string {
     bytes := s -> i8[];
@@ -43,9 +34,12 @@ func (h Header) Values(key string) string[] {
     return values;
 }
 func (h *Header) Del(key string) { delete(h.values, lower(key)); }
-struct Request { Method string; URL string; Header Header; Body string; }
+struct Request { Method string; URL string; Header Header; Body string; Cancel *Cancellation; Deadline int; ResponseLimit int; }
 struct Response { Status string; StatusCode int; Header Header; Body string; }
-struct Client { MaxResponseBytes int; }
+// Timeout is an overall nanosecond budget. Zero means no deadline.
+interface RoundTripper { func RoundTrip(request Request) Result<Response>; }
+struct Client { MaxResponseBytes int; Timeout int; TLSClientConfig TLSConfig; Transport RoundTripper; }
+struct TLSConfig { RootCAFile string; }
 func token(text string) bool {
     if (len(text) == 0) return false;
     for (_, c := range text) {
@@ -59,10 +53,12 @@ func safeValue(text string) bool {
 }
 struct target { host string; port string; path string; authority string; }
 func parseURL(url string) Result<target> {
-    if (len(url) < 7 || url[:7] != "http://") return Result<target>.error("http: only http:// URLs are supported");
-    rest := url[7:]; end := len(rest);
+    prefix := 7; portDefault := "80";
+    if (len(url) >= 8 && url[:8] == "https://") { prefix = 8; portDefault = "443"; }
+    else if (len(url) < 7 || url[:7] != "http://") return Result<target>.error("http: only http:// and https:// URLs are supported");
+    rest := url[prefix:]; end := len(rest);
     for (i, c := range rest) { if (c == '/' || c == '?' || c == '#') { end = i; break; } }
-    authority := rest[:end]; host := authority; port := "80";
+    authority := rest[:end]; host := authority; port := portDefault;
     colon := index(authority, ":");
     if (colon >= 0) { host = authority[:colon]; port = authority[colon + 1:]; }
     if (len(host) == 0 || index(host, "@") >= 0 || index(host, "[") >= 0) return Result<target>.error("http: invalid or unsupported host");
@@ -80,7 +76,7 @@ func NewRequest(method string, url string, body string) Result<Request> {
     if (method == "") method = "GET";
     if (!token(method)) return Result<Request>.error("http: invalid method");
     parsed := parseURL(url); if (parsed.hasError()) return Result<Request>.error(parsed.error());
-    h: Header; return Result<Request>.value(Request{method, url, h, body});
+    r: Request; r.Method = method; r.URL = url; r.Body = body; return Result<Request>.value(r);
 }
 func Get(url string) Result<Response> { client: Client; return client.Get(url); }
 func Post(url string, contentType string, body string) Result<Response> { client: Client; return client.Post(url, contentType, body); }
@@ -93,6 +89,13 @@ func (c Client) Post(url string, contentType string, body string) Result<Respons
     request := r.unwrap(); request.Header.Set("Content-Type", contentType); return c.Do(request);
 }
 func (c Client) Do(request Request) Result<Response> {
+    if (c.Timeout < 0) return Result<Response>.error("http: negative timeout");
+    deadline := deadlineFor(c.Timeout);
+    if (request.Deadline > 0 && (deadline == 0 || request.Deadline < deadline)) deadline = request.Deadline;
+    request.Deadline = deadline;
+    request.ResponseLimit = c.MaxResponseBytes > 0 ? c.MaxResponseBytes : 16777216;
+    reason := interruption(request.Cancel, deadline);
+    if (reason != "") return Result<Response>.error(reason);
     if (!token(request.Method)) return Result<Response>.error("http: invalid method");
     parsed := parseURL(request.URL); if (parsed.hasError()) return Result<Response>.error(parsed.error());
     t := parsed.unwrap();
@@ -106,39 +109,20 @@ func (c Client) Do(request Request) Result<Response> {
         }
     }
     wire += "\r\n" + request.Body;
-    hints: Address; hints.kind = 1;
-    addresses: *Address = null;
-    host := (t.host + "\0") -> i8[]; port := (t.port + "\0") -> i8[];
-    if (extern.getaddrinfo(host.data, port.data, &hints, (&addresses) -> (*void)) != 0) return Result<Response>.error("http: host lookup failed");
-    defer extern.freeaddrinfo(addresses);
-    fd: i32 = -1; current := addresses;
-    for ((current -> int) != 0) {
-        fd = extern.socket(current.family, current.kind, current.protocol);
-        if (fd >= 0) {
-            if (extern.connect(fd, current.address, current.size) == 0) break;
-            extern.close(fd); fd = -1;
-        }
-        current = current.next -> (*Address);
+    if (c.Transport != null) {
+        result := c.Transport.RoundTrip(request);
+        reason = interruption(request.Cancel, deadline);
+        if (reason != "") return Result<Response>.error(reason);
+        if (!result.hasError() && len(result.unwrap().Body) > request.ResponseLimit)
+            return Result<Response>.error("http: response exceeds size limit");
+        return result;
     }
-    if (fd < 0) return Result<Response>.error("http: connection failed");
-    defer extern.close(fd);
-    bytes := wire -> i8[]; sent := 0;
-    for (sent < len(bytes)) {
-        part := bytes[sent:]; n := extern.send(fd, part.data, len(part) -> uint, 16384);
-        if (n <= 0) return Result<Response>.error("http: send failed");
-        sent += n;
-    }
-    limit := c.MaxResponseBytes > 0 ? c.MaxResponseBytes : 16777216;
-    output := i8[]{}; chunk: i8[4096];
-    for (;;) {
-        n := extern.recv(fd, chunk.data, 4096, 0);
-        if (n < 0) return Result<Response>.error("http: receive failed");
-        if (n == 0) break;
-        if (n > limit - len(output)) return Result<Response>.error("http: response exceeds size limit");
-        output.append(chunk[:n]...);
-    }
-    return parseResponse(output -> string, request.Method == "HEAD");
+    result := exchange(c, request, wire, deadline);
+    reason = interruption(request.Cancel, deadline);
+    if (reason != "") return Result<Response>.error(reason);
+    return result;
 }
+
 func decimal(text string) Result<int> {
     if (len(text) == 0) return Result<int>.error("http: empty length");
     for (_, c := range text) { if (c < '0' || c > '9') return Result<int>.error("http: invalid length"); }
@@ -196,9 +180,18 @@ func responseDepth(text string, head bool, depth int) Result<Response> {
         colon := index(entry, ":");
         if (colon <= 0 || !token(entry[:colon]) || !safeValue(entry[colon + 1:])) return Result<Response>.error("http: invalid response header");
         key := lower(entry[:colon]); value := trim(entry[colon + 1:]);
-        if (key == "content-length" && h.Get(key) != "" && h.Get(key) != value) return Result<Response>.error("http: conflicting lengths");
+        if (key == "content-length") {
+            length := decimal(value);
+            if (length.hasError()) return Result<Response>.error(length.error());
+            previous := h.Values(key);
+            if (len(previous) > 0 && previous[0] != value) return Result<Response>.error("http: conflicting lengths");
+        }
+        if (key == "transfer-encoding" && (len(h.Values(key)) > 0 || lower(value) != "chunked"))
+            return Result<Response>.error("http: unsupported or duplicate transfer encoding");
         h.Add(key, value);
     }
+    if (h.Get("Transfer-Encoding") != "" && h.Get("Content-Length") != "")
+        return Result<Response>.error("http: conflicting transfer encoding and length");
     body := text[end + 4:];
     if (code >= 100 && code < 200) {
         if (code == 101) return Result<Response>.error("http: protocol upgrades unsupported");

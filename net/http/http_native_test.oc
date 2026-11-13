@@ -1,0 +1,99 @@
+package http;
+import "testing";
+func TestHeader(t *testing.T) {
+    h: Header; h.Set("Content-Type", "text/plain"); h.Add("CONTENT-TYPE", "application/json");
+    if (h.Get("content-type") != "text/plain") t.Fatal("case insensitive first value");
+    h.Set("CONTENT-TYPE", "text/html");
+    if (h.Get("Content-Type") != "text/html") t.Fatal("Set must replace");
+    copy := h; copy.Del("content-type");
+    if (copy.Get("Content-Type") != "" || h.Get("Content-Type") == "") t.Fatal("header value semantics");
+}
+func TestRequestValidation(t *testing.T) {
+    if (NewRequest("", "http://localhost?x=1#fragment", "").unwrap().Method != "GET") t.Fatal("default method");
+    cases := string[]{"http://", "http://user@host", "http://host:0", "http://host:65536", "http://host/path with spaces", "http://host/\r\nX:yes"};
+    for (_, url := range cases) { if (!NewRequest("GET", url, "").hasError()) t.Fatalf("accepted {}", url); }
+    if (!NewRequest("GET\r\n", "http://localhost", "").hasError()) t.Fatal("method injection");
+}
+func TestResponseParsing(t *testing.T) {
+    r := parseResponse("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: yes\r\n\r\nhello", false).unwrap();
+    if (r.StatusCode != 200 || r.Status != "200 OK" || r.Body != "hello" || r.Header.Get("x-test") != "yes") t.Fatal("response fields");
+    r = parseResponse("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n2;ext=yes\r\nhi\r\n1\r\n!\r\n0\r\nX-End: yes\r\n\r\n", false).unwrap();
+    if (r.Body != "hi!" || r.StatusCode != 201) t.Fatal("chunked/informational response");
+    r = parseResponse("HTTP/1.0 404 Missing\r\n\r\nmissing", false).unwrap();
+    if (r.StatusCode != 404 || r.Body != "missing") t.Fatal("HTTP status is not a transport error");
+    if (parseResponse("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", true).unwrap().Body != "") t.Fatal("HEAD");
+}
+func TestMalformedResponses(t *testing.T) {
+    cases := string[]{"", "garbage\r\n\r\n", "HTTP/1.1 200 OK\r\nBad Header: yes\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhi", "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nhi", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx"};
+    for (_, wire := range cases) { if (!parseResponse(wire, false).hasError()) t.Fatalf("accepted malformed response {}", wire); }
+}
+func TestPreflightErrors(t *testing.T) {
+    request := NewRequest("GET", "http://localhost", "").unwrap();
+    request.Header.Set("X-Test", "bad\r\nInjected: yes"); client: Client;
+    if (!client.Do(request).hasError()) t.Fatal("header injection");
+    request.Header.Del("X-Test"); request.Header.Set("Content-Length", "5");
+    if (!client.Do(request).hasError()) t.Fatal("framing override");
+    h: Header; h.Add("X", "first"); h.Add("x", "second");
+    if (len(h.Values("X")) != 2 || len(h.Values("missing")) != 0) t.Fatal("Values");
+    wire := "HTTP/1.1 200 OK\r\n\r\n";
+    for (i := 0; i < 18; i++) wire = "HTTP/1.1 100 Continue\r\n\r\n" + wire;
+    if (!parseResponse(wire, false).hasError()) t.Fatal("informational response limit");
+}
+func TestHTTPSAndCancellation(t *testing.T) {
+    request := NewRequest("GET", "https://example.com/path", "").unwrap();
+    parsed := parseURL(request.URL).unwrap();
+    if (parsed.port != "443" || parsed.host != "example.com") t.Fatal("HTTPS URL");
+    cancel: Cancellation; cancel.Cancel(); cancel.Cancel();
+    request = request.WithCancel(&cancel);
+    client: Client;
+    result := client.Do(request);
+    if (!result.hasError() || result.error() != "http: request canceled") t.Fatal("pre-canceled request");
+    resultRequest := NewRequestWithCancel(&cancel, "GET", "https://example.com", "");
+    if (resultRequest.hasError() || !cancel.Canceled()) t.Fatal("cancellation helper");
+    client.Timeout = -1;
+    if (!client.Do(NewRequest("GET", "https://example.com", "").unwrap()).hasError()) t.Fatal("negative timeout");
+}
+func TestIncrementalFraming(t *testing.T) {
+    prefix := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+    if (responseComplete(prefix + "hell", false).unwrap()) t.Fatal("partial content-length response");
+    if (!responseComplete(prefix + "hello", false).unwrap()) t.Fatal("complete content-length response");
+    if (!responseComplete(prefix, true).unwrap()) t.Fatal("HEAD completion");
+    if (!responseComplete("HTTP/1.1 204 No Content\r\n\r\n", false).unwrap()) t.Fatal("204 completion");
+    prefix = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    if (responseComplete(prefix + "5\r\nhello\r\n0\r\nX-End: yes\r\n", false).unwrap()) t.Fatal("partial trailers");
+    if (!responseComplete(prefix + "5\r\nhello\r\n0\r\nX-End: yes\r\n\r\n", false).unwrap()) t.Fatal("chunked completion");
+    if (!responseComplete(prefix + "z\r\n", false).hasError()) t.Fatal("invalid chunk size");
+    if (!responseComplete(prefix + "0\r\n\r\nextra", false).hasError()) t.Fatal("trailing bytes");
+    if (responseComplete("HTTP/1.1 200 OK\r\n\r\nhello", false).unwrap()) t.Fatal("close-delimited requires EOF");
+}
+struct testTransport {}
+func (t testTransport) RoundTrip(request Request) Result<Response> {
+    if (request.Deadline <= 0) return Result<Response>.error("missing deadline");
+    response: Response; response.StatusCode = 200; response.Body = "custom";
+    return Result<Response>.value(response);
+}
+func TestCustomTransport(t *testing.T) {
+    c: Client; c.Timeout = 1000000000; c.Transport = testTransport{};
+    result := c.Get("https://example.com");
+    if (result.hasError() || result.unwrap().Body != "custom") t.Fatal("RoundTripper dispatch");
+}
+func TestHeaderFramingValidation(t *testing.T) {
+    cases := string[]{
+        "HTTP/1.1 200 OK\r\nContent-Length: \r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"};
+    for (_, text := range cases) {
+        if (!parseResponse(text, true).hasError()) t.Fatal("invalid framing accepted on HEAD");
+    }
+}
+func TestRequestDeadlineAndTransportLimit(t *testing.T) {
+    client: Client; client.Timeout = 1000000000; client.Transport = testTransport{};
+    request := NewRequest("GET", "https://example.com", "").unwrap();
+    request.Deadline = 1;
+    expired := client.Do(request);
+    if (!expired.hasError() || expired.error() != "http: timeout exceeded") t.Fatal("earlier request deadline ignored");
+    client.MaxResponseBytes = 1;
+    limited := client.Get("https://example.com");
+    if (!limited.hasError() || limited.error() != "http: response exceeds size limit") t.Fatal("custom transport body limit ignored");
+}

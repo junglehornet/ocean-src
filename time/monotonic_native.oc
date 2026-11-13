@@ -1,0 +1,81 @@
+package time;
+
+// Monotonic returns a monotonic timestamp in nanoseconds. Its origin is
+// unspecified; use only differences between readings in the same process.
+func Monotonic() int {
+    stamp: timespec;
+    pointer: *void = &stamp;
+    status := -1;
+    millis := -1;
+    asm x86_64/linux {
+        mov eax, 228
+        mov edi, 1
+        mov rsi, ${pointer}
+        syscall
+        mov ${status}, rax
+    }
+    asm aarch64/linux {
+        mov x0, #1
+        ldr x1, ${pointer}
+        mov x8, #113
+        svc #0
+        str x0, ${status}
+    }
+    asm riscv64/linux {
+        li a0, 1
+        ld a1, ${pointer}
+        li a7, 113
+        ecall
+        sd a0, ${status}
+    }
+    asm x86_64/macos {
+        mov edi, 6
+        mov rsi, ${pointer}
+        sub rsp, 16
+        call _clock_gettime
+        add rsp, 16
+        movsxd rax, eax
+        mov ${status}, rax
+    }
+    asm aarch64/macos {
+        ldr x1, ${pointer}
+        sub sp, sp, #64
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov w0, #6
+        bl _clock_gettime
+        sxtw x19, w0
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #64
+        str x19, ${status}
+    }
+    asm x86_64/windows {
+        sub rsp, 32
+        call GetTickCount64
+        add rsp, 32
+        mov ${millis}, rax
+    }
+    asm aarch64/windows {
+        sub sp, sp, #64
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        bl GetTickCount64
+        mov x19, x0
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #64
+        str x19, ${millis}
+    }
+    if (millis >= 0) return millis * 1000000;
+    if (status != 0) panic "monotonic clock unavailable on this platform";
+    return stamp.seconds * 1000000000 + stamp.nanoseconds;
+}

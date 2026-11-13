@@ -1,0 +1,7 @@
+package time_test;
+import "time";
+import "testing";
+func TestMonotonic(t *testing.T) {
+    start := time.Monotonic(); time.Sleep(20 * time.Millisecond); end := time.Monotonic();
+    if (end < start || end - start < 10 * time.Millisecond) t.Fatal("monotonic clock did not advance");
+}

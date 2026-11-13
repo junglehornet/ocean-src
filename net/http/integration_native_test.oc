@@ -1,0 +1,149 @@
+package http;
+
+import "testing";
+import "threads";
+import "time";
+import "io";
+
+// Only fixture configuration crosses the native boundary. All HTTP behavior
+// assertions live in Ocean tests; the Python launcher just owns local servers.
+extern buffer<i8> getenv(buffer<i8> name);
+func fixtureEnv(name string) string {
+    key := (name + "\0") -> i8[];
+    raw := extern.getenv(key.data);
+    if ((raw -> int) == 0) return "";
+    bytes := i8[]{};
+    for (i := 0; raw[i] != 0; i++) bytes.append(raw[i]);
+    return bytes -> string;
+}
+func fixture(t *testing.T, name string) string {
+    url := fixtureEnv("OCEAN_HTTP_FIXTURE_" + name);
+    if (url == "") t.Skip("requires local fixtures: run net/http/tests/integration.py");
+    return url;
+}
+func fixtureScale() int {
+    text := fixtureEnv("OCEAN_HTTP_TIMING_SCALE");
+    if (text == "") return 1;
+    value := io.ParseInt(text).unwrapOrElse(1);
+    return value >= 1 && value <= 20 ? value : 1;
+}
+func TestTLSVerifiedPost(t *testing.T) {
+    url := fixture(t, "TRUSTED");
+    client: Client; client.Timeout = fixtureScale() * time.Second;
+    client.TLSClientConfig.RootCAFile = fixture(t, "CA");
+    result := client.Post(url, "application/octet-stream", "a\0b");
+    if (result.hasError()) t.Fatal(result.error());
+    response := result.unwrap();
+    if (response.StatusCode != 201 || response.Body != "a\0b") t.Fatal("TLS POST or binary body did not round trip");
+    if (response.Header.Get("X-Request-Line") != "POST /items?x=1 HTTP/1.1") t.Fatal("request method or target changed");
+    if (response.Header.Get("X-Content-Type") != "application/octet-stream") t.Fatal("request header changed");
+}
+func TestTLSRejectsUntrustedCertificate(t *testing.T) {
+    url := fixture(t, "UNTRUSTED");
+    client: Client; client.Timeout = 2 * fixtureScale() * time.Second;
+    if (!client.Get(url).hasError()) t.Fatal("untrusted certificate accepted");
+}
+func TestTLSRejectsWrongHostname(t *testing.T) {
+    url := fixture(t, "WRONG_HOST");
+    client: Client; client.Timeout = 2 * fixtureScale() * time.Second;
+    client.TLSClientConfig.RootCAFile = fixture(t, "CA");
+    if (!client.Get(url).hasError()) t.Fatal("certificate with wrong hostname accepted");
+}
+func deadlineFixture(t *testing.T, name string) {
+    url := fixture(t, name); scale := fixtureScale();
+    client: Client; client.Timeout = 100 * scale * time.Millisecond;
+    start := time.Monotonic(); result := client.Get(url); elapsed := time.Monotonic() - start;
+    if (!result.hasError() || result.error() != "http: timeout exceeded") t.Fatal("overall deadline did not fire");
+    if (elapsed >= 600 * scale * time.Millisecond) t.Fatal("deadline returned late");
+}
+func TestTLSHandshakeTimeout(t *testing.T) { deadlineFixture(t, "HANDSHAKE_TIMEOUT"); }
+func TestHTTPHeaderTimeout(t *testing.T) { deadlineFixture(t, "HEADER_TIMEOUT"); }
+func TestHTTPBodyTimeout(t *testing.T) { deadlineFixture(t, "BODY_TIMEOUT"); }
+func cancellationFixture(t *testing.T, name string) {
+    url := fixture(t, name); scale := fixtureScale();
+    cancel: Cancellation;
+    request := NewRequestWithCancel(&cancel, "GET", url, "").unwrap();
+    worker := threads.Spawn(func() { time.Sleep(100 * scale * time.Millisecond); cancel.Cancel(); });
+    defer threads.Await(worker);
+    client: Client; client.Timeout = 2 * scale * time.Second;
+    start := time.Monotonic(); result := client.Do(request); elapsed := time.Monotonic() - start;
+    threads.Await(worker);
+    if (!result.hasError() || result.error() != "http: request canceled") t.Fatal("in-flight cancellation did not fire");
+    if (elapsed >= 600 * scale * time.Millisecond) t.Fatal("cancellation returned late");
+}
+func TestTLSHandshakeCancellation(t *testing.T) { cancellationFixture(t, "HANDSHAKE_CANCEL"); }
+func TestHTTPHeaderCancellation(t *testing.T) { cancellationFixture(t, "HEADER_CANCEL"); }
+func TestHTTPBodyCancellation(t *testing.T) { cancellationFixture(t, "BODY_CANCEL"); }
+func uploadFixture(t *testing.T, name string, canceled bool) {
+    url := fixture(t, name); scale := fixtureScale();
+    payload := "x"; for (i := 0; i < 23; i++) payload += payload;
+    client: Client; client.Timeout = 300 * scale * time.Millisecond;
+    cancel: Cancellation; worker := -1;
+    request := NewRequestWithCancel(&cancel, "POST", url, payload).unwrap();
+    if (canceled) {
+        client.Timeout = 2 * scale * time.Second;
+        worker = threads.Spawn(func() { time.Sleep(300 * scale * time.Millisecond); cancel.Cancel(); });
+        defer threads.Await(worker);
+    }
+    start := time.Monotonic(); result := client.Do(request); elapsed := time.Monotonic() - start;
+    if (canceled) threads.Await(worker);
+    expected := canceled ? "http: request canceled" : "http: timeout exceeded";
+    if (!result.hasError() || result.error() != expected) t.Fatal("blocked upload was not interrupted");
+    if (elapsed >= 650 * scale * time.Millisecond) t.Fatal("upload interruption returned late");
+}
+func TestHTTPUploadTimeout(t *testing.T) { uploadFixture(t, "UPLOAD_TIMEOUT", false); }
+func TestHTTPUploadCancellation(t *testing.T) { uploadFixture(t, "UPLOAD_CANCEL", true); }
+func TestHTTPChunkedKeepAlive(t *testing.T) {
+    url := fixture(t, "CHUNKED");
+    client: Client; client.Timeout = fixtureScale() * time.Second;
+    result := client.Get(url);
+    if (result.hasError()) t.Fatal(result.error());
+    if (result.unwrap().Body != "hi!") t.Fatal("split chunks, extensions, or trailers decoded incorrectly");
+}
+func TestHTTPHeadKeepAlive(t *testing.T) {
+    url := fixture(t, "HEAD");
+    client: Client; client.Timeout = fixtureScale() * time.Second;
+    result := client.Do(NewRequest("HEAD", url, "").unwrap());
+    if (result.hasError()) t.Fatal(result.error());
+    if (result.unwrap().Body != "") t.Fatal("HEAD returned a body");
+}
+func TestHTTPCloseDelimited(t *testing.T) {
+    url := fixture(t, "CLOSE");
+    client: Client; client.Timeout = fixtureScale() * time.Second;
+    result := client.Get(url);
+    if (result.hasError()) t.Fatal(result.error());
+    response := result.unwrap();
+    if (response.StatusCode != 404 || response.Body != "missing") t.Fatal("close-delimited response or HTTP error status mishandled");
+}
+func TestHTTPResponseLimit(t *testing.T) {
+    url := fixture(t, "LARGE");
+    client: Client; client.Timeout = fixtureScale() * time.Second; client.MaxResponseBytes = 4096;
+    result := client.Get(url);
+    if (!result.hasError() || result.error() != "http: response exceeds size limit") t.Fatal("response size limit ignored");
+}
+func TestHTTPTruncatedResponse(t *testing.T) {
+    url := fixture(t, "TRUNCATED");
+    client: Client; client.Timeout = fixtureScale() * time.Second;
+    if (!client.Get(url).hasError()) t.Fatal("truncated response accepted");
+}
+func TestHTTPConcurrentRequests(t *testing.T) {
+    url := fixture(t, "CONCURRENT"); scale := fixtureScale();
+    results: bool[4]; workers := int[]{};
+    for (i := 0; i < 4; i++) {
+        slot := i;
+        worker := threads.Spawn(func() {
+            client: Client; client.Timeout = 3 * scale * time.Second;
+            result := client.Get(url);
+            results[slot] = !result.hasError() && result.unwrap().Body == "OK";
+        });
+        workers.append(worker);
+        defer threads.Await(worker);
+    }
+    for (_, worker := range workers) threads.Await(worker);
+    for (_, ok := range results) { if (!ok) t.Fatal("concurrent independent request failed"); }
+}
+func TestHTTPConnectionRefused(t *testing.T) {
+    url := fixture(t, "REFUSED");
+    client: Client; client.Timeout = 200 * fixtureScale() * time.Millisecond;
+    if (!client.Get(url).hasError()) t.Fatal("connection refusal accepted");
+}

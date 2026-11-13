@@ -1,0 +1,7 @@
+package http;
+
+// Ocean's API is synchronous; JavaScript Fetch is asynchronous. A host adapter
+// must provide a RoundTripper with appropriate suspension/worker integration.
+func exchange(client Client, request Request, wire string, deadline int) Result<Response> {
+    return Result<Response>.error("http: WebAssembly requires a host-supplied RoundTripper");
+}

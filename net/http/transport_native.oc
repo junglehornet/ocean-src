@@ -1,0 +1,139 @@
+package http;
+import "sync";
+import "time";
+
+// libcurl handles native DNS, sockets and verified TLS. CONNECT_ONLY leaves
+// HTTP serialization and bounded response parsing in Ocean; no C callbacks.
+extern i32 curl_global_init(int flags);
+extern *void curl_easy_init();
+extern void curl_easy_cleanup(*void handle);
+extern i32 curl_easy_setopt(*void handle, i32 option, ...);
+extern i32 curl_easy_send(*void handle, buffer<i8> data, uint size, *uint sent);
+extern i32 curl_easy_recv(*void handle, buffer<i8> data, uint size, *uint received);
+extern *void curl_multi_init();
+extern i32 curl_multi_add_handle(*void multi, *void easy);
+extern i32 curl_multi_remove_handle(*void multi, *void easy);
+extern i32 curl_multi_cleanup(*void multi);
+extern i32 curl_multi_perform(*void multi, *i32 running);
+extern i32 curl_multi_poll(*void multi, *void extra, u32 count, i32 milliseconds, *i32 ready);
+extern *message curl_multi_info_read(*void multi, *i32 remaining);
+extern *versionInfo curl_version_info(i32 age);
+// Stable public libcurl ABI constants (curl/curl.h); Ocean has no const yet.
+optURL: i32 = 10002;
+optProxy: i32 = 10004;
+optCAInfo: i32 = 10065;
+optConnectOnly: i32 = 141;
+optNoSignal: i32 = 99;
+optVerifyPeer: i32 = 64;
+optVerifyHost: i32 = 81;
+optSSLVersion: i32 = 32;
+optProtocols: i32 = 181;
+optHTTPVersion: i32 = 84;
+curlAgain: i32 = 81;
+struct message { kind i32; easy *void; result i32; }
+struct versionInfo { age i32; version *void; number u32; host *void; features i32; }
+
+initializationMutex: sync.Mutex;
+initialized: bool;
+func initialize() bool {
+    initializationMutex.Lock(); defer initializationMutex.Unlock();
+    if (initialized) return true;
+    // Version 7.68+ provides multi_poll; async DNS is required so a hostname
+    // lookup cannot bypass the cancellation/deadline loop.
+    info := extern.curl_version_info(0);
+    if ((info -> int) == 0 || info.number < 476160 || (info.features & 132) != 132) return false;
+    if (extern.curl_global_init(3) != 0) return false;
+    initialized = true; return true;
+}
+func windows() bool {
+    result := 0;
+    asm x86_64/windows { mov qword ptr ${result}, 1 }
+    asm aarch64/windows { mov x0, #1
+        str x0, ${result} }
+    return result != 0;
+}
+func setLong(handle *void, option i32, value int) bool {
+    // C long is 32 bits on Windows, 64 bits on the Unix targets.
+    if (windows()) return extern.curl_easy_setopt(handle, option, value -> i32) == 0;
+    return extern.curl_easy_setopt(handle, option, value) == 0;
+}
+func pollBudget(deadline int) i32 {
+    if (deadline == 0) return 10;
+    remaining := deadline - time.Monotonic();
+    if (remaining <= 0) return 0;
+    if (remaining >= 10000000) return 10;
+    return ((remaining + 999999) / 1000000) -> i32;
+}
+func exchange(client Client, request Request, wire string, deadline int) Result<Response> {
+    reason := interruption(request.Cancel, deadline);
+    if (reason != "") return Result<Response>.error(reason);
+    if (!initialize()) return Result<Response>.error("http: libcurl 7.68+ with TLS and asynchronous DNS required");
+    easy := extern.curl_easy_init();
+    if ((easy -> int) == 0) return Result<Response>.error("http: transport allocation failed");
+    defer extern.curl_easy_cleanup(easy);
+    url := (request.URL + "\0") -> i8[];
+    ca := (client.TLSClientConfig.RootCAFile + "\0") -> i8[];
+    if (index(client.TLSClientConfig.RootCAFile, "\0") >= 0) return Result<Response>.error("http: root CA path contains NUL");
+    if (extern.curl_easy_setopt(easy, optURL, url.data) != 0 ||
+        extern.curl_easy_setopt(easy, optProxy, "\0".data) != 0 ||
+        !setLong(easy, optConnectOnly, 1) || !setLong(easy, optNoSignal, 1) ||
+        !setLong(easy, optVerifyPeer, 1) || !setLong(easy, optVerifyHost, 2) ||
+        !setLong(easy, optSSLVersion, 6) || !setLong(easy, optProtocols, 3) || !setLong(easy, optHTTPVersion, 2))
+        return Result<Response>.error("http: transport setup failed");
+    if (client.TLSClientConfig.RootCAFile != "" && extern.curl_easy_setopt(easy, optCAInfo, ca.data) != 0)
+        return Result<Response>.error("http: root CA setup failed");
+    multi := extern.curl_multi_init();
+    if ((multi -> int) == 0) return Result<Response>.error("http: transport allocation failed");
+    defer extern.curl_multi_cleanup(multi);
+    if (extern.curl_multi_add_handle(multi, easy) != 0) return Result<Response>.error("http: cannot start connection");
+    defer extern.curl_multi_remove_handle(multi, easy);
+    running: i32 = 1;
+    for (running != 0) {
+        reason = interruption(request.Cancel, deadline);
+        if (reason != "") return Result<Response>.error(reason);
+        if (extern.curl_multi_perform(multi, &running) != 0) return Result<Response>.error("http: connection failed");
+        if (running != 0) {
+            ready: i32;
+            if (extern.curl_multi_poll(multi, zero(*void), 0, pollBudget(deadline), &ready) != 0)
+                return Result<Response>.error("http: connection poll failed");
+        }
+    }
+    remaining: i32; finished := false;
+    for (;;) {
+        msg := extern.curl_multi_info_read(multi, &remaining);
+        if ((msg -> int) == 0) break;
+        if (msg.kind == 1) {
+            if (msg.result != 0) return Result<Response>.error("http: connection or TLS verification failed");
+            finished = true;
+        }
+    }
+    if (!finished) return Result<Response>.error("http: incomplete connection");
+    bytes := wire -> i8[]; sent := 0;
+    for (sent < len(bytes)) {
+        reason = interruption(request.Cancel, deadline);
+        if (reason != "") return Result<Response>.error(reason);
+        part := bytes[sent:]; count: uint;
+        status := extern.curl_easy_send(easy, part.data, len(part) -> uint, &count);
+        if (status == curlAgain) { time.Sleep(pollBudget(deadline) -> int * time.Millisecond); continue; }
+        if (status != 0 || count == 0) return Result<Response>.error("http: send failed");
+        sent += count -> int;
+    }
+    limit := client.MaxResponseBytes > 0 ? client.MaxResponseBytes : 16777216;
+    output := i8[]{}; chunk: i8[16384];
+    for (;;) {
+        reason = interruption(request.Cancel, deadline);
+        if (reason != "") return Result<Response>.error(reason);
+        count: uint; status := extern.curl_easy_recv(easy, chunk.data, 16384, &count);
+        if (status == curlAgain) { time.Sleep(pollBudget(deadline) -> int * time.Millisecond); continue; }
+        if (status != 0) return Result<Response>.error("http: receive failed");
+        if (count == 0) break;
+        n := count -> int;
+        if (n > limit - len(output)) return Result<Response>.error("http: response exceeds size limit");
+        output.append(chunk[:n]...);
+        text := output -> string;
+        state := responseComplete(text, request.Method == "HEAD");
+        if (state.hasError()) return Result<Response>.error(state.error());
+        if (state.unwrap()) return parseResponse(text, request.Method == "HEAD");
+    }
+    return parseResponse(output -> string, request.Method == "HEAD");
+}

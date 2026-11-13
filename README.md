@@ -272,9 +272,10 @@ architectures; portable Ocean routines cover the remaining paths.
 
 ## HTTP, JSON, and processes
 
-- [`net/http`](net/http/README.md): Go-inspired blocking HTTP/1.1 client with
-  requests, responses, headers, chunked decoding, and response size limits.
-  This initial implementation supports plain HTTP on 64-bit Linux.
+- [`net/http`](net/http/README.md): HTTP/1.1 and verified HTTPS, overall timeouts,
+  cancellation, incremental framing, and response limits. Uses libcurl 7.68+
+  (TLS + asynchronous DNS) across seven native targets. Wasm compilation uses
+  a host-supplied RoundTripper instead of native libcurl/thread imports.
 - [`encoding/json`](encoding/json/README.md): JSON Marshal, Unmarshal, Valid,
   precise Number values, heterogeneous arrays, objects, and struct encoding.
 - [`os/exec`](os/exec/README.md): Command, LookPath, Run, Output, and
@@ -284,6 +285,6 @@ architectures; portable Ocean routines cover the remaining paths.
 These packages use `Result<T>` for recoverable errors. See each package's README
 for its supported subset of the Go APIs. `io.FormatFloat(value float) string`
 provides locale-independent round-trip float formatting used by JSON.
-The matching compiler needs the interface-array, enum tuple boxing, field-name
-resolution, and boxed-array ownership fixes. Run `ocean test ./...` to run all
+The matching compiler needs interface-array/enum ownership fixes, libcurl
+linking (including object-cache hits), and native/Wasm source-file selection. Run `ocean test ./...` to run all
 standard-library tests; HTTP tests need loopback socket access.

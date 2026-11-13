@@ -1,0 +1,164 @@
+name: HTTP native platforms
+
+on:
+  pull_request:
+    paths: ['net/http/**', 'time/**', '.github/workflows/http-platforms.yml']
+  push:
+    paths: ['net/http/**', 'time/**', '.github/workflows/http-platforms.yml']
+  workflow_dispatch:
+    inputs:
+      compiler_ref:
+        description: 'Compiler revision with native platform support and libcurl auto-linking'
+        default: main
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, os: linux }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, os: linux }
+          - { runner: macos-15-intel, arch: x86_64, os: macos }
+          - { runner: macos-15, arch: aarch64, os: macos }
+          - { runner: windows-2025, arch: x86_64, os: windows, msystem: CLANG64, prefix: mingw-w64-clang-x86_64 }
+          - { runner: windows-11-arm, arch: aarch64, os: windows, msystem: CLANGARM64, prefix: mingw-w64-clang-aarch64 }
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ocean-src
+      - uses: actions/checkout@v4
+        with:
+          repository: junglehornet/ocean-c
+          ref: ${{ inputs.compiler_ref || 'main' }}
+          submodules: recursive
+          path: ocean-c
+      - uses: actions/setup-python@v5
+        if: matrix.os != 'windows'
+        with:
+          python-version: '3.12'
+      - if: matrix.os == 'linux'
+        name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 lld-19 libffi-dev libcurl4-openssl-dev openssl ninja-build
+          python3 -m pip install 'cmake>=4.2,<5'
+          mkdir -p "$RUNNER_TEMP/ocean-tools"
+          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/ocean-tools/clang"
+          ln -s /usr/bin/wasm-ld-19 "$RUNNER_TEMP/ocean-tools/wasm-ld"
+          echo "$RUNNER_TEMP/ocean-tools" >> "$GITHUB_PATH"
+      - if: matrix.os == 'macos'
+        name: macOS dependencies
+        run: |
+          brew install llvm libffi curl openssl@3 ninja
+          python3 -m pip install 'cmake>=4.2,<5'
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libffi)" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix libffi)/lib:$(brew --prefix curl)/lib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$(brew --prefix libffi)/lib:$(brew --prefix curl)/lib" >> "$GITHUB_ENV"
+      - if: matrix.os == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            git
+            ${{ matrix.prefix }}-clang
+            ${{ matrix.prefix }}-llvm
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-ninja
+            ${{ matrix.prefix }}-libffi
+            ${{ matrix.prefix }}-curl
+            ${{ matrix.prefix }}-openssl
+            ${{ matrix.prefix }}-python
+      - if: matrix.os != 'windows'
+        name: Build and test Unix
+        run: |
+          cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$GITHUB_WORKSPACE/ocean-src"
+          cmake --build ocean-c/build --target ocean-c -j 4
+          export OCEAN_SRC="$GITHUB_WORKSPACE/ocean-src"
+          ocean-c/build/ocean-c test ocean-src/net/http ocean-src/time --notty --timeout 30s
+          python3 ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c
+          python3 ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c --cache "$RUNNER_TEMP/http-cache"
+          python3 ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c
+      - if: matrix.os == 'windows'
+        name: Build and test Windows
+        shell: msys2 {0}
+        run: |
+          cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$(cygpath -m "$PWD/ocean-src")"
+          cmake --build ocean-c/build --target ocean-c -j 4
+          export OCEAN_SRC="$(cygpath -m "$PWD/ocean-src")"
+          ocean-c/build/ocean-c.exe test ocean-src/net/http ocean-src/time --notty --timeout 30s
+          python ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c.exe
+          python ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c.exe --cache "$(cygpath -m "$RUNNER_TEMP/http-cache")"
+          python ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c.exe
+  wasm:
+    runs-on: ubuntu-24.04
+    name: JavaScript-Wasm and foreign assembly
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ocean-src
+      - uses: actions/checkout@v4
+        with:
+          repository: junglehornet/ocean-c
+          ref: ${{ inputs.compiler_ref || 'main' }}
+          submodules: recursive
+          path: ocean-c
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 lld-19 libffi-dev libcurl4-openssl-dev ninja-build
+          python3 -m pip install 'cmake>=4.2,<5'
+          mkdir -p "$RUNNER_TEMP/ocean-tools"
+          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/ocean-tools/clang"
+          ln -s /usr/bin/wasm-ld-19 "$RUNNER_TEMP/ocean-tools/wasm-ld"
+          echo "$RUNNER_TEMP/ocean-tools" >> "$GITHUB_PATH"
+      - name: Compile and execute Wasm smoke tests
+        run: |
+          cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$GITHUB_WORKSPACE/ocean-src"
+          cmake --build ocean-c/build --target ocean-c asm_backend_probe -j 4
+          python3 ocean-src/net/http/tests/wasm.py ocean-c/build/ocean-c
+          python3 ocean-src/net/http/tests/assembly.py ocean-c/build/asm_backend_probe "$(command -v clang)"
+  riscv64:
+    runs-on: ubuntu-24.04
+    name: linux-riscv64 (QEMU)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ocean-src
+      - uses: actions/checkout@v4
+        with:
+          repository: junglehornet/ocean-c
+          ref: ${{ inputs.compiler_ref || 'main' }}
+          submodules: recursive
+          path: ocean-c
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+      - name: Build and run in RISC-V64 Linux
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: none
+          distro: none
+          base_image: --platform=linux/riscv64 riscv64/ubuntu:26.04
+          install: |
+            apt-get update
+            apt-get install -y clang libffi-dev libcurl4-openssl-dev openssl cmake ninja-build python3
+          run: |
+            cmake -S ocean-c -B ocean-c/build -G Ninja -DOCEAN_STANDARD_LIBRARY_SOURCE="$PWD/ocean-src"
+            cmake --build ocean-c/build --target ocean-c -j 4
+            export OCEAN_SRC="$PWD/ocean-src"
+            ocean-c/build/ocean-c test ocean-src/net/http ocean-src/time --notty --timeout 60s
+            OCEAN_HTTP_TIMING_SCALE=5 python3 ocean-src/net/http/tests/integration.py ocean-c/build/ocean-c
+            python3 ocean-src/net/http/tests/linking.py ocean-c/build/ocean-c

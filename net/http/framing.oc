@@ -1,0 +1,88 @@
+package http;
+
+// -1 means that more bytes (or EOF for a close-delimited body) are needed.
+// Complete framed responses finish without waiting for the peer to close.
+func responseComplete(text string, head bool) Result<bool> {
+    end := frameEnd(text, head, 0);
+    if (end.hasError()) return Result<bool>.error(end.error());
+    n := end.unwrap();
+    if (n < 0) return Result<bool>.value(false);
+    if (n != len(text)) return Result<bool>.error("http: trailing response data");
+    return Result<bool>.value(true);
+}
+func frameEnd(text string, head bool, depth int) Result<int> {
+    if (depth > 16) return Result<int>.error("http: too many informational responses");
+    end := index(text, "\r\n\r\n");
+    if (end < 0) {
+        if (len(text) > 65540) return Result<int>.error("http: response headers exceed size limit");
+        return Result<int>.value(-1);
+    }
+    if (end > 65536) return Result<int>.error("http: response headers exceed size limit");
+    lineEnd := index(text, "\r\n");
+    if (lineEnd < 12) return Result<int>.error("http: invalid status line");
+    codeResult := decimal(text[9:12]);
+    if (codeResult.hasError()) return Result<int>.error(codeResult.error());
+    code := codeResult.unwrap(); offset := end + 4;
+    if (code >= 100 && code < 200 && code != 101) {
+        if (text[:9] != "HTTP/1.1 " && text[:9] != "HTTP/1.0 ") return Result<int>.error("http: invalid status line");
+        // Validate each interim header block through the ordinary parser, using
+        // a final synthetic no-body response after it.
+        checked := parseResponse(text[:offset] + "HTTP/1.1 204 No Content\r\n\r\n", true);
+        if (checked.hasError()) return Result<int>.error(checked.error());
+        next := frameEnd(text[offset:], head, depth + 1);
+        if (next.hasError() || next.unwrap() < 0) return next;
+        return Result<int>.value(offset + next.unwrap());
+    }
+    checked := parseResponse(text[:offset], true);
+    if (checked.hasError()) return Result<int>.error(checked.error());
+    response := checked.unwrap();
+    if (head || code == 204 || code == 304) return Result<int>.value(offset);
+    transfer := lower(response.Header.Get("Transfer-Encoding")); length := response.Header.Get("Content-Length");
+    if (transfer != "") {
+        if (transfer != "chunked" || length != "") return Result<int>.error("http: unsupported or conflicting transfer encoding");
+        chunks := chunkEnd(text[offset:]);
+        if (chunks.hasError() || chunks.unwrap() < 0) return chunks;
+        return Result<int>.value(offset + chunks.unwrap());
+    }
+    if (length == "") return Result<int>.value(-1);
+    count := decimal(length);
+    if (count.hasError()) return Result<int>.error(count.error());
+    n := count.unwrap();
+    if (n > len(text) - offset) return Result<int>.value(-1);
+    return Result<int>.value(offset + n);
+}
+func chunkEnd(text string) Result<int> {
+    pos := 0;
+    for (;;) {
+        end := index(text[pos:], "\r\n");
+        if (end < 0) return Result<int>.value(-1);
+        line := text[pos:pos + end]; pos += end + 2;
+        semi := index(line, ";"); if (semi >= 0) line = line[:semi];
+        if (len(line) == 0) return Result<int>.error("http: invalid chunk size");
+        size := 0;
+        for (_, c := range lower(line)) {
+            digit := index("0123456789abcdef", i8[]{c} -> string);
+            if (digit < 0 || size > (9223372036854775807 - digit) / 16) return Result<int>.error("http: invalid chunk size");
+            size = size * 16 + digit;
+        }
+        if (size == 0) {
+            trailerStart := pos;
+            for (;;) {
+                end = index(text[pos:], "\r\n");
+                if (end < 0) {
+                    if (len(text) - trailerStart > 65536) return Result<int>.error("http: trailers exceed size limit");
+                    return Result<int>.value(-1);
+                }
+                line = text[pos:pos + end]; pos += end + 2;
+                if (pos - trailerStart > 65536) return Result<int>.error("http: trailers exceed size limit");
+                if (line == "") return Result<int>.value(pos);
+                colon := index(line, ":");
+                if (colon <= 0 || !token(line[:colon]) || !safeValue(line[colon + 1:])) return Result<int>.error("http: invalid trailer");
+            }
+        }
+        if (size > len(text) - pos || len(text) - pos - size < 2) return Result<int>.value(-1);
+        pos += size;
+        if (text[pos:pos + 2] != "\r\n") return Result<int>.error("http: missing chunk terminator");
+        pos += 2;
+    }
+}

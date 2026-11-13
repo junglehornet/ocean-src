@@ -1,0 +1,4 @@
+package time;
+// The host must return a monotonic int64 nanosecond timestamp (JS BigInt).
+extern int ocean_time_monotonic_ns();
+func Monotonic() int { return extern.ocean_time_monotonic_ns(); }

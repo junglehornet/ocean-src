@@ -43,3 +43,11 @@ macOS execution still requires host validation.
 Run `OCEAN=/path/to/ocean python3 time/tests/test_time.py` to check unit values,
 cached/uncached builds, nonpositive/tiny/multichunk sleeps, no threading runtime
 dependency, and repeated signal interruption on Linux.
+
+`Monotonic() int` returns monotonic nanoseconds with an unspecified origin. Use
+only differences between readings within the same process. Linux uses
+CLOCK_MONOTONIC, macOS uses clock_gettime(CLOCK_MONOTONIC), and Windows uses
+GetTickCount64 converted from milliseconds (its precision is not nanoseconds).
+The JavaScript/Wasm variant imports `env.ocean_time_monotonic_ns() -> i64`; a JS
+host returns BigInt nanoseconds from a monotonic source such as performance.now().
+The compiler selects `_native.oc` and `_wasm.oc` files before parsing imports.

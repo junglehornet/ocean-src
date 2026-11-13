@@ -1,0 +1,20 @@
+package http;
+import "time";
+func (r Request) WithCancel(cancel *Cancellation) Request {
+    copy := r; copy.Cancel = cancel; return copy;
+}
+func NewRequestWithCancel(cancel *Cancellation, method string, url string, body string) Result<Request> {
+    result := NewRequest(method, url, body);
+    if (result.hasError()) return result;
+    return Result<Request>.value(result.unwrap().WithCancel(cancel));
+}
+func interruption(cancel *Cancellation, deadline int) string {
+    if ((cancel -> int) != 0 && cancel != null && cancel.Canceled()) return "http: request canceled";
+    if (deadline > 0 && time.Monotonic() >= deadline) return "http: timeout exceeded";
+    return "";
+}
+func deadlineFor(timeout int) int {
+    if (timeout <= 0) return 0;
+    start := time.Monotonic();
+    return timeout > 9223372036854775807 - start ? 9223372036854775807 : start + timeout;
+}

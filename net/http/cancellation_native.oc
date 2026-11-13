@@ -1,0 +1,9 @@
+package http;
+import "sync";
+// Keep Cancellation at a stable address. Never copy it after first use.
+// It is caller-owned and can cancel several requests; cancellation is permanent.
+struct Cancellation { mutex sync.Mutex; canceled bool; }
+func (c *Cancellation) Cancel() { c.mutex.Lock(); c.canceled = true; c.mutex.Unlock(); }
+func (c *Cancellation) Canceled() bool {
+    c.mutex.Lock(); defer c.mutex.Unlock(); return c.canceled;
+}
