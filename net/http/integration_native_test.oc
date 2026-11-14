@@ -89,7 +89,16 @@ func uploadFixture(t *testing.T, name string, canceled bool) {
     if (canceled) threads.Await(worker);
     expected := canceled ? "http: request canceled" : "http: timeout exceeded";
     if (!result.hasError() || result.error() != expected) t.Fatal("blocked upload was not interrupted");
-    if (elapsed >= 650 * scale * time.Millisecond) t.Fatal("upload interruption returned late");
+    if (elapsed >= 650 * scale * time.Millisecond)
+        t.Fatalf("upload interruption returned late: {}ms, expected {}, body {} bytes, scale {}", elapsed/time.Millisecond, expected, len(payload), scale);
+}
+func TestHTTPLargeUpload(t *testing.T) {
+    url := fixture(t, "UPLOAD_ECHO");
+    payload := "a\0b"; for (i := 0; i < 16; i++) payload += payload;
+    client: Client; client.Timeout = 3 * fixtureScale() * time.Second;
+    result := client.Post(url, "application/octet-stream", payload);
+    if (result.hasError()) t.Fatal(result.error());
+    if (result.unwrap().Body != payload) t.Fatal("multi-chunk upload did not preserve all binary bytes");
 }
 func TestHTTPUploadTimeout(t *testing.T) { uploadFixture(t, "UPLOAD_TIMEOUT", false); }
 func TestHTTPUploadCancellation(t *testing.T) { uploadFixture(t, "UPLOAD_CANCEL", true); }

@@ -120,8 +120,12 @@ func exchange(client Client, request Request, wire string, deadline int) Result<
     for (sent < len(bytes)) {
         reason = interruption(request.Cancel, deadline);
         if (reason != "") return Result<Response>.error(reason);
-        part := bytes[sent:]; count: uint;
-        status := extern.curl_easy_send(easy, part.data, len(part) -> uint, &count);
+        // Slices own their bytes. Retrying with bytes[sent:] would copy the
+        // entire unsent body while a blocked peer prevents forward progress.
+        // Borrow a bounded chunk so cancellation is checked between sends.
+        size := len(bytes) - sent; if (size > 65536) size = 65536;
+        data := (&bytes[sent]) -> (buffer<i8>); count: uint;
+        status := extern.curl_easy_send(easy, data, size -> uint, &count);
         if (status == curlAgain) { time.Sleep(pollBudget(deadline) -> int * time.Millisecond); continue; }
         if (status != 0 || count == 0) return Result<Response>.error("http: send failed");
         sent += count -> int;

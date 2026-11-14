@@ -168,6 +168,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-http-tls-') as tmp:
         env['OCEAN_HTTP_FIXTURE_' + name] = f'{"https" if https else "http"}://{host}:{server.port}/items?x=1'
     env['OCEAN_HTTP_FIXTURE_CA'] = str(root/'ca.pem')
     register('TRUSTED', tls, mode='echo', https=True, host='localhost')
+    register('UPLOAD_ECHO', mode='echo')
     register('UNTRUSTED', tls, https=True, host='localhost')
     register('WRONG_HOST', tls, https=True)
     for suffix in ('TIMEOUT', 'CANCEL'):

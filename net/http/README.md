@@ -54,7 +54,9 @@ apply to the built-in native transport; custom transports configure their own.
 Timeout is a nonnegative nanosecond budget; use `time.Second` and
 `time.Millisecond`. Zero means no deadline. It spans request preparation, DNS,
 TCP connect, TLS handshake, upload, and response reading. Polling checks deadlines
-and cancellation at intervals of at most 10 ms, subject to OS scheduling, clock
+and cancellation at intervals of at most 10 ms. Upload retries borrow chunks
+of at most 64 KiB from the existing body buffer without copying the unsent body.
+Timing remains subject to OS scheduling, clock
 resolution, and libcurl operations. There are no detached per-request worker
 threads. Handles are removed and cleaned up on every return path. Cancellation
 and timeout errors are `http: request canceled` and `http: timeout exceeded`.
