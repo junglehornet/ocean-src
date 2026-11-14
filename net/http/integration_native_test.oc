@@ -100,10 +100,14 @@ func uploadFixture(t *testing.T, name string, canceled bool) {
 }
 func TestHTTPLargeUpload(t *testing.T) {
     url := fixture(t, "UPLOAD_ECHO");
-    payload := "a\0b"; for (i := 0; i < 16; i++) payload += payload;
-    client: Client; client.Timeout = 3 * fixtureScale() * time.Second;
+    // 96 KiB crosses the 64 KiB send boundary without making this correctness
+    // test a throughput benchmark on emulated targets.
+    payload := "a\0b"; for (i := 0; i < 15; i++) payload += payload;
+    client: Client; client.Timeout = 15 * fixtureScale() * time.Second;
+    start := time.Monotonic();
     result := client.Post(url, "application/octet-stream", payload);
-    if (result.hasError()) t.Fatal(result.error());
+    if (result.hasError())
+        t.Fatalf("large upload failed: {}, {} bytes, {}ms elapsed, {}ms budget", result.error(), len(payload), (time.Monotonic()-start)/time.Millisecond, client.Timeout/time.Millisecond);
     if (result.unwrap().Body != payload) t.Fatal("multi-chunk upload did not preserve all binary bytes");
 }
 func TestHTTPUploadTimeout(t *testing.T) { uploadFixture(t, "UPLOAD_TIMEOUT", false); }
