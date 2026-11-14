@@ -42,8 +42,13 @@ streams, context cancellation, timeout, or Wasm backend. Empty Env
 cannot request an empty child environment. Child output capture requires a
 writable system temporary directory and has no output-size bound.
 
-Run `ocean test os/exec`; tests use local Unix tools or Windows PowerShell and do not require network
-access. Use the matching compiler and this standard-library source tree.
+Run `ocean test os/exec` for the Unix utility tests. On Windows, run
+`python os/exec/tests/integration.py /path/to/ocean-c.exe`; it compiles a small
+native fixture with Clang and tests arguments, replacement environments, working
+directories, exit codes, and large output without PowerShell startup overhead.
+Each invocation logs START/DONE markers, the command, exit code, and elapsed
+time. Timeout reports retain the last START marker. No network access is needed.
+Use the matching compiler and this standard-library source tree.
 
 The matching compiler supplies the native process bridge: POSIX spawn on Unix
 and Unicode CreateProcess on Windows. Windows argument quoting preserves spaces,

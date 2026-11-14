@@ -10,8 +10,11 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import sys
 import threading
 import time
+
+if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('compiler', type=Path)
@@ -25,7 +28,18 @@ scale = int(os.environ.get('OCEAN_HTTP_TIMING_SCALE', '1'))
 assert 1 <= scale <= 20
 
 def command(*argv):
-    p = subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=180 + 45 * scale, env=env)
+    timeout = 180 + 45 * scale
+    print('START HTTP fixture:', *map(str, argv), 'timeout=', timeout, flush=True)
+    started = time.monotonic()
+    try:
+        p = subprocess.run([str(a) for a in argv], capture_output=True, text=True,
+                           encoding="utf-8", timeout=timeout, env=env)
+    except subprocess.TimeoutExpired as error:
+        print('TIMED OUT HTTP fixture:', argv, 'stdout=', error.stdout,
+              'stderr=', error.stderr, flush=True)
+        raise
+    print('DONE HTTP fixture:', argv[0], 'exit=', p.returncode,
+          'elapsed=', round(time.monotonic() - started, 2), flush=True)
     assert p.returncode == 0, (argv, p.returncode, p.stdout, p.stderr)
     return p
 
@@ -41,6 +55,12 @@ class Server:
         self.errors = []
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
+    def stall(self):
+        # Keep a deliberately blocked connection open until test teardown.
+        # Fixed sleeps can expire before a delayed cancellation worker runs,
+        # letting peer closure affect cancellation/deadline test results.
+        if not self.stop.wait(180 + 45 * scale):
+            self.errors.append(TimeoutError('stalled fixture was not stopped'))
     def run(self):
         try:
             for _ in range(self.count):
@@ -55,7 +75,7 @@ class Server:
                 peer.settimeout(10 * scale)
                 try:
                     if self.mode == 'handshake-stall':
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     if self.context:
                         try:
@@ -72,7 +92,7 @@ class Server:
                         continue
                     headers, body = data.split(b'\r\n\r\n', 1)
                     if self.mode == 'upload-stall':
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     length = 0
                     for line in headers.split(b'\r\n')[1:]:
@@ -85,11 +105,11 @@ class Server:
                             break
                         body += part
                     if self.mode == 'header-stall':
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     if self.mode == 'body-stall':
                         peer.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\na')
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     if self.mode == 'echo':
                         content_type = b''
@@ -154,6 +174,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-http-tls-') as tmp:
         env['OCEAN_HTTP_FIXTURE_' + name] = f'{"https" if https else "http"}://{host}:{server.port}/items?x=1'
     env['OCEAN_HTTP_FIXTURE_CA'] = str(root/'ca.pem')
     register('TRUSTED', tls, mode='echo', https=True, host='localhost')
+    register('UPLOAD_ECHO', mode='echo')
     register('UNTRUSTED', tls, https=True, host='localhost')
     register('WRONG_HOST', tls, https=True)
     for suffix in ('TIMEOUT', 'CANCEL'):

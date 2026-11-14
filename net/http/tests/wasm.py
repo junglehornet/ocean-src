@@ -42,7 +42,7 @@ func main() int {
     module=root/'http.wasm'
     env=dict(os.environ,OCOS='js',OCARCH='wasm',OCEAN_SRC=str(stdlib),OCEAN_BUILD_CACHE=str(root/'cache'))
     def build(*args):
-        result=subprocess.run([str(compiler),*map(str,args)],env=env,capture_output=True,text=True,timeout=120)
+        result=subprocess.run([str(compiler),*map(str,args)],env=env,capture_output=True,text=True,encoding="utf-8",timeout=120)
         assert result.returncode==0,(args,result.stdout,result.stderr)
     cached_modules=[]
     for _ in range(2):
@@ -50,7 +50,7 @@ func main() int {
         assert module.read_bytes()[:4]==b'\0asm'
         validated=subprocess.run([node,'-e',
             "new WebAssembly.Module(require('fs').readFileSync(process.argv[1]))",str(module)],
-            capture_output=True,text=True,timeout=30)
+            capture_output=True,text=True,encoding="utf-8",timeout=30)
         assert validated.returncode==0,(validated.stdout,validated.stderr)
         cached_modules.append(module.read_bytes())
     build('check',source)
@@ -94,6 +94,6 @@ console.log('HTTP Wasm host transport, deadline, pre-cancel and missing-adapter 
 ''')
     for data in [*cached_modules,module.read_bytes()]:
         module.write_bytes(data)
-        result=subprocess.run([node,str(script),str(module)],capture_output=True,text=True,timeout=30)
+        result=subprocess.run([node,str(script),str(module)],capture_output=True,text=True,encoding="utf-8",timeout=30)
         assert result.returncode==0,(result.stdout,result.stderr)
     print(result.stdout.strip())

@@ -54,7 +54,11 @@ apply to the built-in native transport; custom transports configure their own.
 Timeout is a nonnegative nanosecond budget; use `time.Second` and
 `time.Millisecond`. Zero means no deadline. It spans request preparation, DNS,
 TCP connect, TLS handshake, upload, and response reading. Polling checks deadlines
-and cancellation at intervals of at most 10 ms, subject to OS scheduling, clock
+and cancellation at intervals of at most 10 ms. Upload retries borrow chunks
+of at most 64 KiB from the existing body buffer without copying the unsent body.
+Headers and body are sent separately, avoiding a full-body string concatenation
+before the transport can observe interruption.
+Timing remains subject to OS scheduling, clock
 resolution, and libcurl operations. There are no detached per-request worker
 threads. Handles are removed and cleaned up on every return path. Cancellation
 and timeout errors are `http: request canceled` and `http: timeout exceeded`.
@@ -148,3 +152,9 @@ cold/hot/uncached modules and runs a custom host-transport smoke test in Node;
 its minimal allocator shim is test-only, not a production runtime/Fetch adapter.
 The assembly test checks all seven clock variants at -O0/-O2. The CI workflow
 covers each native target plus Wasm; foreign execution requires those CI runners.
+
+CI uses Clang/LLD 23 for native x86-64/AArch64 and JavaScript/Wasm. RISC-V uses
+the Ubuntu 26.04 native Clang 21 toolchain. The linking harness accepts
+`OCEAN_HTTP_BUILD_TIMEOUT` in seconds (default 120, CI uses 900 under QEMU);
+this compile budget does not change HTTP request deadlines. Subprocess output
+is decoded as UTF-8 on every host.

@@ -40,7 +40,12 @@ func TestCopySeparateStorage(t *testing.T) {
     source: u8[4] = {0, 128, 255, 42};
     dest: u8[6] = {9, 9, 9, 9, 9, 9};
     mem.Copy(source.data, &dest[1], source.size);
-    if (dest != u8[6]{9, 0, 128, 255, 42, 9}) t.Fatal("incorrect destination bytes");
+    expected: u8[6] = {9, 0, 128, 255, 42, 9};
+    for (i := 0; i < 6; i++) {
+        if (dest[i] != expected[i])
+            t.Fatalf("destination byte {}: wanted {}, got {}; copied {} bytes", i, expected[i], dest[i], source.size);
+    }
+    if (dest != u8[6]{9, 0, 128, 255, 42, 9}) t.Fatal("destination bytes match, but fixed-array equality failed");
     if (source != u8[4]{0, 128, 255, 42}) t.Fatal("source changed");
 }
 

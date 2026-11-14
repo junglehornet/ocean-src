@@ -4,9 +4,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 compiler = Path(sys.argv[1]).resolve()
 stdlib = Path(__file__).resolve().parents[3]
+build_timeout = int(os.environ.get('OCEAN_HTTP_BUILD_TIMEOUT', '120'))
+assert 1 <= build_timeout <= 3600
+if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8')
 with tempfile.TemporaryDirectory(prefix='ocean-http-link-') as directory:
     root = Path(directory)
     source = root/'main.oc'
@@ -22,7 +26,15 @@ func main() int {
     binary = root/('program.exe' if os.name == 'nt' else 'program')
     env = dict(os.environ, OCEAN_SRC=str(stdlib), OCEAN_BUILD_CACHE=str(root/'cache'))
     def run(*args):
-        p = subprocess.run([str(a) for a in args], env=env, capture_output=True, text=True, timeout=120)
+        timeout = build_timeout if Path(args[0]) == compiler else 30
+        print('START linking:', *map(str, args), 'timeout=', timeout, flush=True)
+        started = time.monotonic()
+        try:
+            p = subprocess.run([str(a) for a in args], env=env, capture_output=True, text=True,encoding="utf-8", timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            print('TIMED OUT linking:', args, 'stdout=', error.stdout, 'stderr=', error.stderr, flush=True)
+            raise
+        print('DONE linking:', args[0], 'exit=', p.returncode, 'elapsed=', round(time.monotonic()-started, 2), flush=True)
         assert p.returncode == 0, (args,p.stdout,p.stderr)
     for _ in range(2):
         run(compiler, 'build', source, '-o', binary)
