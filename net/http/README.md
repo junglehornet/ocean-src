@@ -56,6 +56,8 @@ Timeout is a nonnegative nanosecond budget; use `time.Second` and
 TCP connect, TLS handshake, upload, and response reading. Polling checks deadlines
 and cancellation at intervals of at most 10 ms. Upload retries borrow chunks
 of at most 64 KiB from the existing body buffer without copying the unsent body.
+Headers and body are sent separately, avoiding a full-body string concatenation
+before the transport can observe interruption.
 Timing remains subject to OS scheduling, clock
 resolution, and libcurl operations. There are no detached per-request worker
 threads. Handles are removed and cleaned up on every return path. Cancellation

@@ -108,7 +108,9 @@ func (c Client) Do(request Request) Result<Response> {
             wire += key + ": " + value + "\r\n";
         }
     }
-    wire += "\r\n" + request.Body;
+    // Keep the body separate: building one large string copies every body byte
+    // before the native transport can observe cancellation or the deadline.
+    wire += "\r\n";
     if (c.Transport != null) {
         result := c.Transport.RoundTrip(request);
         reason = interruption(request.Cancel, deadline);
