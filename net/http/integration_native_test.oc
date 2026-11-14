@@ -61,15 +61,16 @@ func TestHTTPHeaderTimeout(t *testing.T) { deadlineFixture(t, "HEADER_TIMEOUT");
 func TestHTTPBodyTimeout(t *testing.T) { deadlineFixture(t, "BODY_TIMEOUT"); }
 func cancellationFixture(t *testing.T, name string) {
     url := fixture(t, name); scale := fixtureScale();
-    cancel: Cancellation;
+    cancel: Cancellation; canceledAt := 0;
     request := NewRequestWithCancel(&cancel, "GET", url, "").unwrap();
-    worker := threads.Spawn(func() { time.Sleep(100 * scale * time.Millisecond); cancel.Cancel(); });
+    worker := threads.Spawn(func() { time.Sleep(100 * scale * time.Millisecond); canceledAt = time.Monotonic(); cancel.Cancel(); });
     defer threads.Await(worker);
     client: Client; client.Timeout = 2 * scale * time.Second;
-    start := time.Monotonic(); result := client.Do(request); elapsed := time.Monotonic() - start;
+    result := client.Do(request); finishedAt := time.Monotonic();
     threads.Await(worker);
     if (!result.hasError() || result.error() != "http: request canceled") t.Fatal("in-flight cancellation did not fire");
-    if (elapsed >= 600 * scale * time.Millisecond) t.Fatal("cancellation returned late");
+    if (finishedAt - canceledAt >= 500 * scale * time.Millisecond)
+        t.Fatalf("cancellation returned late: {}ms after cancellation", (finishedAt-canceledAt)/time.Millisecond);
 }
 func TestTLSHandshakeCancellation(t *testing.T) { cancellationFixture(t, "HANDSHAKE_CANCEL"); }
 func TestHTTPHeaderCancellation(t *testing.T) { cancellationFixture(t, "HEADER_CANCEL"); }
@@ -85,12 +86,17 @@ func uploadFixture(t *testing.T, name string, canceled bool) {
         worker = threads.Spawn(func() { time.Sleep(300 * scale * time.Millisecond); canceledAt = time.Monotonic(); cancel.Cancel(); });
         defer threads.Await(worker);
     }
-    start := time.Monotonic(); result := client.Do(request); elapsed := time.Monotonic() - start;
+    start := time.Monotonic(); result := client.Do(request); finishedAt := time.Monotonic();
+    elapsed := finishedAt - start;
     if (canceled) threads.Await(worker);
     expected := canceled ? "http: request canceled" : "http: timeout exceeded";
     if (!result.hasError() || result.error() != expected) t.Fatal("blocked upload was not interrupted");
-    if (elapsed >= 650 * scale * time.Millisecond)
-        t.Fatalf("upload interruption returned late: {}ms, cancellation at {}ms, expected {}, body {} bytes, scale {}", elapsed/time.Millisecond, canceled ? (canceledAt-start)/time.Millisecond : -1, expected, len(payload), scale);
+    // Sleep provides a minimum delay, not a scheduling deadline. Measure the
+    // response to actual cancellation, keeping the original 350 ms allowance.
+    latency := canceled ? finishedAt - canceledAt : elapsed;
+    budget := (canceled ? 350 : 650) * scale * time.Millisecond;
+    if (latency >= budget)
+        t.Fatalf("upload interruption returned late: {}ms response latency, {}ms total, cancellation at {}ms, expected {}, body {} bytes, scale {}", latency/time.Millisecond, elapsed/time.Millisecond, canceled ? (canceledAt-start)/time.Millisecond : -1, expected, len(payload), scale);
 }
 func TestHTTPLargeUpload(t *testing.T) {
     url := fixture(t, "UPLOAD_ECHO");

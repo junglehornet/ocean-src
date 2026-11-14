@@ -55,6 +55,12 @@ class Server:
         self.errors = []
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
+    def stall(self):
+        # Keep a deliberately blocked connection open until test teardown.
+        # Fixed sleeps can expire before a delayed cancellation worker runs,
+        # letting peer closure affect cancellation/deadline test results.
+        if not self.stop.wait(180 + 45 * scale):
+            self.errors.append(TimeoutError('stalled fixture was not stopped'))
     def run(self):
         try:
             for _ in range(self.count):
@@ -69,7 +75,7 @@ class Server:
                 peer.settimeout(10 * scale)
                 try:
                     if self.mode == 'handshake-stall':
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     if self.context:
                         try:
@@ -86,7 +92,7 @@ class Server:
                         continue
                     headers, body = data.split(b'\r\n\r\n', 1)
                     if self.mode == 'upload-stall':
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     length = 0
                     for line in headers.split(b'\r\n')[1:]:
@@ -99,11 +105,11 @@ class Server:
                             break
                         body += part
                     if self.mode == 'header-stall':
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     if self.mode == 'body-stall':
                         peer.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\na')
-                        time.sleep(.7 * scale)
+                        self.stall()
                         continue
                     if self.mode == 'echo':
                         content_type = b''
